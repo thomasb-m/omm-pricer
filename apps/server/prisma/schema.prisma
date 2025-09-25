@@ -1,0 +1,67 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Instrument {
+  id         String   @id
+  name       String   @unique
+  kind       String
+  currency   String
+  strike     Float?
+  optionType String?
+  expiryMs   BigInt?
+  createdAt  DateTime @default(now())
+}
+
+model Ticker {
+  id         Int      @id @default(autoincrement())
+  tsMs       BigInt
+  instrument String
+  markIv     Float?
+  markPrice  Float?
+  bestBid    Float?
+  bestAsk    Float?
+  underlying Float?
+}
+
+model TickIndex {
+  id        Int      @id @default(autoincrement())
+  tsMs      BigInt
+  indexName String
+  price     Float
+}
+
+model Trade {
+  id         BigInt   @id @default(autoincrement())
+  tsMs       BigInt
+  instrument String
+  price      Float
+  size       Float
+  side       String?
+  tradeId    String?  @unique
+}
+
+model Position {
+  instrument  String   @id                // instrument_name (or future symbol)
+  qty         Float                         // +long / -short (contracts)
+  avgPrice    Float                         // average entry price in instrument currency
+  updatedAt   DateTime @default(now())
+}
+
+model Fill {
+  id          BigInt   @id @default(autoincrement())
+  tsMs        BigInt
+  instrument  String
+  side        String                // "buy" | "sell"
+  price       Float
+  qty         Float                 // positive number (direction by side)
+  fee         Float?                // optional
+}
