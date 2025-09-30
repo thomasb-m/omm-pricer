@@ -18,6 +18,7 @@ export interface InventoryBucket {
   vega: number;
   count: number;
   strikes: number[];
+  edgeRequired?: number;
 }
 
 export class SmileInventoryController {
@@ -39,7 +40,8 @@ export class SmileInventoryController {
       bucketInv = {
         vega: 0,
         count: 0,
-        strikes: []
+        strikes: [],
+        edgeRequired: 0
       };
       this.inventory.set(bucket, bucketInv);
     }
@@ -76,9 +78,12 @@ export class SmileInventoryController {
       const normalized = Math.abs(inv.vega) / Vref;
       const edgeRequired = -Math.sign(inv.vega) * (E0 + kappa * Math.pow(normalized, gamma));
       
+      // Store for diagnostics
+      inv.edgeRequired = edgeRequired;
+      
       // Convert edge to smile parameter changes
-      // Calibration factors - these would be fitted to real market behavior
-      const TICK_TO_VOL = 0.01;  // 1 tick = 0.1% vol
+      // REDUCED: Was 0.01, now 0.0001 for reasonable adjustments
+      const TICK_TO_VOL = 0.0001;  // 1 tick = 0.01% vol instead of 1% vol
       
       switch (bucket) {
         case 'atm':
@@ -114,14 +119,10 @@ export class SmileInventoryController {
           break;
           
         case 'wings':
-          // Far wings - mostly affects wing slopes
-          if (inv.vega < 0) {
-            deltaSNeg += -Math.abs(edgeRequired) * TICK_TO_VOL * 0.4;
-            deltaS0 += Math.abs(edgeRequired) * TICK_TO_VOL * 0.1;
-          } else {
-            deltaSNeg -= -Math.abs(edgeRequired) * TICK_TO_VOL * 0.4;
-            deltaS0 -= Math.abs(edgeRequired) * TICK_TO_VOL * 0.1;
-          }
+          // Far wings - mostly affects wing slopes  
+          deltaL0 += edgeRequired * TICK_TO_VOL * 0.1;  // Allow signed adjustment
+          deltaSNeg += -edgeRequired * TICK_TO_VOL * 0.4;
+          deltaS0 += edgeRequired * TICK_TO_VOL * 0.1;
           break;
       }
     }
@@ -145,14 +146,19 @@ export class SmileInventoryController {
     // Calculate adjustments
     const adjustments = this.calculateSmileAdjustments();
     
-    // Apply adjustments
+    // FIXED: Allow L0 to decrease when long (removed Math.max wrapper)
     const adjustedMetrics: TraderMetrics = {
-      L0: Math.max(0, baseMetrics.L0 + adjustments.deltaL0),
+      L0: baseMetrics.L0 + adjustments.deltaL0,  // Can now go down when long!
       S0: baseMetrics.S0 + adjustments.deltaS0,
       C0: Math.max(0.1, baseMetrics.C0 + adjustments.deltaC0),
       S_neg: baseMetrics.S_neg + adjustments.deltaSNeg,
       S_pos: baseMetrics.S_pos + adjustments.deltaSPos
     };
+    
+    // Ensure L0 stays positive (but allows decrease)
+    if (adjustedMetrics.L0 <= 0) {
+      adjustedMetrics.L0 = 0.001;  // Minimum positive value
+    }
     
     // Convert back to SVI
     const sviConfig = this.createSVIConfig();
@@ -192,6 +198,29 @@ export class SmileInventoryController {
    */
   getInventoryState(): Map<string, InventoryBucket> {
     return new Map(this.inventory);
+  }
+  
+  /**
+   * Get inventory summary
+   */
+  getInventory() {
+    const total = { vega: 0, gamma: 0, theta: 0 };
+    const byBucket: any = {};
+    
+    for (const [bucket, inv] of this.inventory) {
+      total.vega += inv.vega;
+      byBucket[bucket] = {
+        vega: inv.vega,
+        count: inv.count
+      };
+    }
+    
+    return {
+      total,
+      totalVega: total.vega,
+      byBucket,
+      smileAdjustments: this.calculateSmileAdjustments()
+    };
   }
   
   /**

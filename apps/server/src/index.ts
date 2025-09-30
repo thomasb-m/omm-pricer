@@ -4,6 +4,7 @@ import "dotenv/config";
 import { PrismaClient } from "@prisma/client";
 import { startIngest } from "./ingest";
 import { computePortfolioRisk, computeRealizedPnL } from "./risk";
+import { quoteEngine } from "./quoteEngine";
 
 async function main() {
   console.log(`[server] PORT=${process.env.PORT} NETWORK=${process.env.DERIBIT_NETWORK} MOCK=${process.env.MOCK_MODE}`);
@@ -112,6 +113,61 @@ async function main() {
       take: limit
     });
     return rows;
+  });
+
+  // === VOLATILITY MODEL QUOTES ===
+  
+  // Get single quote
+  app.post<{
+    Body: { symbol: string; strike: number; expiry?: number; size?: number; side?: 'BUY' | 'SELL' }
+  }>("/quote", async (req) => {
+    const { symbol = 'BTC', strike, expiry = 0.08, size, side } = req.body;
+    const quote = quoteEngine.getQuote({ symbol, strike, expiry, size, side });
+    return quote;
+  });
+
+  // Get quote grid
+  app.post<{
+    Body: { symbol: string; strikes: number[]; expiry?: number }
+  }>("/quote/grid", async (req) => {
+    const { symbol = 'BTC', strikes, expiry = 0.08 } = req.body;
+    const quotes = quoteEngine.getQuoteGrid(symbol, strikes, expiry);
+    return quotes;
+  });
+
+  // Execute trade (update vol model)
+  app.post<{
+    Body: { symbol: string; strike: number; side: 'BUY' | 'SELL'; size: number; price: number }
+  }>("/trade/execute", async (req) => {
+    const trade = { ...req.body, timestamp: Date.now() };
+    quoteEngine.executeTrade(trade);
+    
+    // Get updated inventory
+    const inv = quoteEngine.getInventory(trade.symbol);
+    
+    return {
+      success: true,
+      trade,
+      inventory: inv
+    };
+  });
+
+  // Update spot price
+  app.post<{
+    Body: { symbol: string; spot: number }
+  }>("/spot/update", async (req) => {
+    const { symbol, spot } = req.body;
+    quoteEngine.updateSpot(symbol, spot);
+    return { success: true, symbol, spot };
+  });
+
+  // Get current inventory
+  app.get<{
+    Querystring: { symbol?: string }
+  }>("/inventory", async (req) => {
+    const symbol = req.query.symbol || 'BTC';
+    const inv = quoteEngine.getInventory(symbol);
+    return inv;
   });
 
   const port = Number(process.env.PORT || 3001);
