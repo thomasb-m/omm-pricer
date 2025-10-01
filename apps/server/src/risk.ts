@@ -1,4 +1,4 @@
-import { PrismaClient, Instrument, Position } from "@prisma/client";
+import { PrismaClient } from "@prisma/client";
 
 const YEAR_MS = 365.25 * 24 * 3600 * 1000;
 
@@ -84,10 +84,10 @@ export async function computePortfolioRisk(prisma: PrismaClient): Promise<Portfo
   const Findex = await getLatestIndex(prisma, "btc_usd"); // BTCUSD spot
   const usdMult = denom === "USD" ? (Findex ?? 0) : 1;    // multiply BTC amounts by spot to show USD
 
-  const metaMap = new Map<string, Instrument>();
-  const getMeta = async (name: string) => {
+  const metaMap = new Map<string, any>();
+  const getMeta = async (name: string): Promise<any> => {
     if (metaMap.has(name)) return metaMap.get(name)!;
-    const m = await prisma.instrument.findUnique({ where: { id: name } });
+    const m: any = await prisma.instrument.findUnique({ where: { id: name } });
     if (m) metaMap.set(name, m);
     return m!;
   };

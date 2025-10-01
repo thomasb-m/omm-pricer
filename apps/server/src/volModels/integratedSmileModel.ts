@@ -334,39 +334,39 @@ import {
         let k = safe(Math.log(strike / Math.max(forward, tiny)), 0);
       
         // 4) Core curve (CC): variance → IV → Black-76 price
-        let ccVar = safe(SVI.w(surface.cc, k), tiny);
-        ccVar = Math.max(ccVar, tiny);
-      
-        let ccIV = safe(Math.sqrt(ccVar / T), 0);
-        ccIV = Math.max(ccIV, 1e-8);
-      
-        console.debug("[b76 cc] args", { F: forward, K: strike, T, sigma: ccIV, isCall });
-        const ccG = black76Greeks(forward, strike, T, ccIV, isCall, 1.0);
-        const ccMid = safe(ccG.price, 0);
-      
-        // 5) Price curve (PC): variance → IV → Black-76 price
-        let pcVar = safe(SVI.w(surface.pc, k), tiny);
-        pcVar = Math.max(pcVar, tiny);
-      
-        let pcIV = safe(Math.sqrt(pcVar / T), 0);
-        pcIV = Math.max(pcIV, 1e-8);
-      
-        console.debug("[b76 pc] args", { F: forward, K: strike, T, sigma: pcIV, isCall });
-        const pcG = black76Greeks(forward, strike, T, pcIV, isCall, 1.0);
-        const pcMid = safe(pcG.price, 0);
+let ccVar = safe(SVI.w(surface.cc, k), tiny);
+ccVar = Math.max(ccVar, tiny);
 
-        const sanePrice = (p: number) =>
-        Number.isFinite(p) && p >= 0 && p <= Math.max(forward, strike) * 2; // option price must be <= O(forward)
-        const proxyMid = (iv: number) => forward * iv * Math.sqrt(T) * 0.4;   // simple convexity proxy
+let ccIV = safe(Math.sqrt(ccVar / T), 0);
+ccIV = Math.max(ccIV, 1e-8);
 
-        if (!sanePrice(ccMid)) {
-        console.warn("[ISM.getQuote] ccMid insane; clamping via proxy", { ccMid, forward, strike, T, ccIV });
-        ccMid = proxyMid(ccIV);
-        }
-        if (!sanePrice(pcMid)) {
-        console.warn("[ISM.getQuote] pcMid insane; clamping via proxy", { pcMid, forward, strike, T, pcIV });
-        pcMid = proxyMid(pcIV);
-        }
+console.debug("[b76 cc] args", { F: forward, K: strike, T, sigma: ccIV, isCall });
+const ccG = black76Greeks(forward, strike, T, ccIV, isCall, 1.0);
+const ccMidBase = safe(ccG.price, 0);
+
+// 5) Price curve (PC): variance → IV → Black-76 price
+let pcVar = safe(SVI.w(surface.pc, k), tiny);
+pcVar = Math.max(pcVar, tiny);
+
+let pcIV = safe(Math.sqrt(pcVar / T), 0);
+pcIV = Math.max(pcIV, 1e-8);
+
+console.debug("[b76 pc] args", { F: forward, K: strike, T, sigma: pcIV, isCall });
+const pcG = black76Greeks(forward, strike, T, pcIV, isCall, 1.0);
+const pcMidBase = safe(pcG.price, 0);
+
+// ---- helpers for sanity + proxy (define ONCE)
+const midIsSane = (p: number) =>
+  Number.isFinite(p) && p >= 0 && p <= Math.max(forward, strike) * 2;
+
+const proxyMid = (iv: number) => forward * iv * Math.sqrt(T) * 0.4; // simple convexity proxy
+
+// ---- choose override or fallback, then sanity-clamp
+const ccMidCandidate = proxyMid ? proxyMid(ccIV) : ccMidBase;
+const pcMidCandidate = proxyMid ? proxyMid(pcIV) : pcMidBase;
+
+const ccMid = midIsSane(ccMidCandidate) ? ccMidCandidate : proxyMid(ccIV);
+const pcMid = midIsSane(pcMidCandidate) ? pcMidCandidate : proxyMid(pcIV);
       
         // 6) Bucket (put-delta convention) for inventory/sizing
         const bucket = DeltaConventions.strikeToBucket(strike, forward, ccIV, T);

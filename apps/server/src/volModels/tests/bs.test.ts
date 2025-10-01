@@ -1,23 +1,39 @@
-// apps/server/src/volModels/tests/bs.test.ts
-import { blackScholes, DeltaConventions } from "../pricing/blackScholes";
+import { black76Greeks } from "../../risk";
 
-function sanityCheck() {
-  const call = blackScholes({
-    strike: 100,
-    spot: 100,
-    vol: 0.2,
-    T: 1,
-    r: 0.0,
-    isCall: true
+describe("black76Greeks", () => {
+  const F = 100_000;
+  const T = 0.25; // 3 months
+  const df = 1;
+
+  test("finite outputs for reasonable inputs (call)", () => {
+    const g = black76Greeks(F, F, T, 0.3, true, df);
+    for (const [k, v] of Object.entries(g)) {
+      expect(Number.isFinite(v as number)).toBe(true);
+    }
   });
 
-  console.log("ATM Call (S=100, K=100, vol=20%, T=1yr):");
-  console.log(`  Price ≈ ${call.price.toFixed(2)} (should be ~7.97)`);
-  console.log(`  Delta ≈ ${call.delta.toFixed(3)} (should be ~0.54)`);
-  console.log(`  Vega  ≈ ${call.vega.toFixed(2)} (should be ~39.89)`);
-  console.log(`  Theta ≈ ${call.theta.toFixed(2)} (should be ~-3.99)`);
+  test("finite outputs for reasonable inputs (put)", () => {
+    const g = black76Greeks(F, F, T, 0.3, false, df);
+    for (const [k, v] of Object.entries(g)) {
+      expect(Number.isFinite(v as number)).toBe(true);
+    }
+  });
 
-  console.log("Bucket test:", DeltaConventions.strikeToBucket(100, 100, 0.2, 1));
-}
+  test("call price increases with vol", () => {
+    const p1 = black76Greeks(F, F, T, 0.1, true, df).price;
+    const p2 = black76Greeks(F, F, T, 0.4, true, df).price;
+    expect(p2).toBeGreaterThan(p1);
+  });
 
-sanityCheck();
+  test("put price increases with vol", () => {
+    const p1 = black76Greeks(F, F, T, 0.1, false, df).price;
+    const p2 = black76Greeks(F, F, T, 0.4, false, df).price;
+    expect(p2).toBeGreaterThan(p1);
+  });
+
+  test("deep OTM call ~ small", () => {
+    const p = black76Greeks(F, F * 10, T, 0.3, true, df).price;
+    expect(p).toBeGreaterThanOrEqual(0);
+    expect(p).toBeLessThan(1e-3 * F); // tiny vs forward
+  });
+});
