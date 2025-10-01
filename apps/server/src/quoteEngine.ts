@@ -1,33 +1,42 @@
-// Create new file: apps/server/src/quoteEngine.ts
-
+// apps/server/src/quoteEngine.ts
 import { PrismaClient } from "@prisma/client";
 import { volService } from './volModels/integration/volModelService';
 
 export interface QuoteRequest {
   symbol: string;
   strike: number;
-  expiry?: number;
+  expiryMs: number;                 // absolute ms
+  optionType: 'C' | 'P';
   size?: number;
   side?: 'BUY' | 'SELL';
+  marketIV?: number;                // ATM IV (decimal) to calibrate
 }
 
 export interface Quote {
   symbol: string;
   strike: number;
+  expiryMs: number;
+  optionType: 'C'|'P';
   bid: number;
   ask: number;
   bidSize: number;
   askSize: number;
   mid: number;
   spread: number;
+  edge: number;
   forward: number;
   timestamp: number;
+  pcMid?: number;
+  ccMid?: number;
+  bucket?: string;
 }
 
 export interface Trade {
   symbol: string;
   strike: number;
-  side: 'BUY' | 'SELL';  // Customer side
+  expiryMs: number;
+  optionType: 'C'|'P';
+  side: 'BUY' | 'SELL';             // CUSTOMER side
   size: number;
   price: number;
   timestamp: number;
@@ -35,115 +44,106 @@ export interface Trade {
 
 export class QuoteEngine {
   private forwards: Map<string, number> = new Map();
-  
+
   constructor() {
-    // Initialize with default forwards
     this.forwards.set('BTC', 45000);
     this.forwards.set('ETH', 3000);
   }
-  
-  // Update forward price (from perpetual)
+
   updateForward(symbol: string, forward: number): void {
     this.forwards.set(symbol, forward);
+    // keep vol service in sync
+    volService.updateSpot(symbol, forward);
     console.log(`Updated ${symbol} forward to ${forward}`);
   }
-  
-  // Get current forward
+
   getForward(symbol: string): number {
     return this.forwards.get(symbol) || 45000;
   }
-  
-  // Get a single quote
-  getQuote(request: QuoteRequest): Quote {
-    const { symbol, strike, expiry = 0.08, size, side } = request;
-    
-    // Get current forward
-    const forward = this.getForward(symbol);
-    
-    // Get quote from vol model (passing forward as "spot")
-    const modelQuote = volService.getQuote(symbol, strike, expiry);
-    
-    // Adjust sizes based on request
-    let bidSize = modelQuote.bidSize;
-    let askSize = modelQuote.askSize;
-    
-    if (side === 'SELL' && size) {
-      bidSize = Math.min(bidSize, size);
-    } else if (side === 'BUY' && size) {
-      askSize = Math.min(askSize, size);
-    }
-    
-    const mid = (modelQuote.bid + modelQuote.ask) / 2;
-    
+
+  getQuote(req: QuoteRequest): Quote {
+    const forward = this.getForward(req.symbol);
+
+    // NEW: drive the IntegratedSmileModel via volService
+    const q = volService.getQuoteWithIV(
+      req.symbol,
+      req.expiryMs,
+      req.strike,
+      req.optionType,
+      req.marketIV
+    );
+
+    // size clamp (optional)
+    let bidSize = q.bidSize;
+    let askSize = q.askSize;
+    if (req.side === 'SELL' && req.size) bidSize = Math.min(bidSize, req.size);
+    if (req.side === 'BUY'  && req.size) askSize = Math.min(askSize, req.size);
+
     return {
-      symbol,
-      strike,
-      bid: modelQuote.bid,
-      ask: modelQuote.ask,
+      symbol: req.symbol,
+      strike: req.strike,
+      expiryMs: req.expiryMs,
+      optionType: req.optionType,
+      bid: q.bid,
+      ask: q.ask,
       bidSize,
       askSize,
-      mid,
-      spread: modelQuote.ask - modelQuote.bid,
+      mid: q.mid,
+      spread: q.spread,
+      edge: q.edge,
       forward,
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      pcMid: q.pcMid,     // 👈
+      ccMid: q.ccMid,     // 👈
+      bucket: q.bucket   // 👈
     };
   }
-  
-  // Get multiple quotes (for a quote grid)
-  getQuoteGrid(symbol: string, strikes: number[], expiry: number = 0.08): Quote[] {
-    return strikes.map(strike => 
-      this.getQuote({ symbol, strike, expiry })
+
+  getQuoteGrid(symbol: string, strikes: number[], expiryMs: number, optionType: 'C'|'P' = 'C'): Quote[] {
+    return strikes.map(strike =>
+      this.getQuote({ symbol, strike, expiryMs, optionType })
     );
   }
-  
-  // Execute a trade
+
   executeTrade(trade: Trade): void {
-    const { symbol, strike, side, size, price } = trade;
-    
-    // Update the vol model
-    const result = volService.onCustomerTrade(
-      symbol,
-      strike,
-      side,
-      size,
-      price
+    const forward = this.getForward(trade.symbol);
+
+    // ✅ route trade into the model (customer side; service handles signing)
+    volService.onCustomerTrade(
+      trade.symbol,
+      trade.strike,
+      trade.side,               // 'BUY' | 'SELL' (customer side)
+      trade.size,
+      trade.price,
+      trade.expiryMs,
+      trade.optionType,
+      trade.timestamp
     );
-    
-    if (result) {
-      console.log(`Trade executed: Customer ${side} ${size}x ${strike} @ ${price}`);
-      
-      // Show inventory after trade
-      const inv = volService.getInventory(symbol);
-      if (inv) {
-        console.log(`${symbol} inventory: ${inv.totalVega.toFixed(1)} vega`);
-      }
+
+    console.log(`Trade executed: Customer ${trade.side} ${trade.size}x ${trade.strike} @ ${trade.price}`);
+
+    const inv = volService.getInventory(trade.symbol);
+    if (inv) {
+      const tv = Number(inv.totalVega ?? inv.total?.vega ?? 0);
+      console.log(`${trade.symbol} inventory: ${inv.totalVega.toFixed(1)} vega`);
     }
   }
-  
-  // Get inventory
+
   getInventory(symbol: string) {
     return volService.getInventory(symbol);
   }
 }
 
-// Create instance
 export const quoteEngine = new QuoteEngine();
 
-// Initialize with market data
 export async function initializeWithMarketData(prisma: PrismaClient) {
-  // Get BTC perpetual (this is the forward)
   const btcPerp = await prisma.ticker.findFirst({
     where: { instrument: "BTC-PERPETUAL" },
     orderBy: { tsMs: "desc" }
   });
-  
+
   const btcForward = btcPerp?.markPrice || btcPerp?.lastPrice || 45000;
-  
   console.log(`Initializing BTC with forward: ${btcForward}`);
   quoteEngine.updateForward('BTC', btcForward);
-  
-  // Update the vol model's "spot" (which is really forward)
-  volService.updateSpot('BTC', btcForward);
-  
   return btcForward;
 }

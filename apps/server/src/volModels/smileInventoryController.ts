@@ -83,7 +83,7 @@ export class SmileInventoryController {
       
       // Convert edge to smile parameter changes
       // REDUCED: Was 0.01, now 0.0001 for reasonable adjustments
-      const TICK_TO_VOL = 0.0001;  // 1 tick = 0.01% vol instead of 1% vol
+      const TICK_TO_VOL = 0.005;  // 0.5% vol per tick — just for debugging visibility
       
       switch (bucket) {
         case 'atm':
@@ -162,15 +162,32 @@ export class SmileInventoryController {
     
     // Convert back to SVI
     const sviConfig = this.createSVIConfig();
-    const adjustedSVI = SVI.fromMetrics(adjustedMetrics, sviConfig);
-    
-    // Validate
-    if (!SVI.validate(adjustedSVI, sviConfig)) {
-      console.warn('Adjusted SVI failed validation, returning original');
-      return ccParams;
-    }
-    
-    return adjustedSVI;
+let adjustedSVI = SVI.fromMetrics(adjustedMetrics, sviConfig);
+
+// ✅ Backoff loop: shrink the adjustment until valid
+if (!SVI.validate(adjustedSVI, sviConfig)) {
+  let scale = 0.5;
+  const base = SVI.toMetrics(ccParams);
+  while (scale > 1e-3) {
+    const m: TraderMetrics = {
+      L0: base.L0 + adjustments.deltaL0 * scale,
+      S0: base.S0 + adjustments.deltaS0 * scale,
+      C0: Math.max(0.1, base.C0 + adjustments.deltaC0 * scale),
+      S_neg: base.S_neg + adjustments.deltaSNeg * scale,
+      S_pos: base.S_pos + adjustments.deltaSPos * scale,
+    };
+    const candidate = SVI.fromMetrics(m, sviConfig);
+    if (SVI.validate(candidate, sviConfig)) { adjustedSVI = candidate; break; }
+    scale *= 0.5;
+  }
+  // If still invalid, keep CC but at least log it
+  if (!SVI.validate(adjustedSVI, sviConfig)) {
+    console.warn('Adjusted SVI still invalid after backoff; using CC (no PC separation).');
+    return ccParams;
+  }
+}
+
+return adjustedSVI;
   }
   
   /**

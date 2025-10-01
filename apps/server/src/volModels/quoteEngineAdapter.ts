@@ -1,40 +1,40 @@
 /**
  * Quote Engine Adapter
- * Integrates the smile-based volatility model with existing quote engines
+ * Bridges the integrated smile model to external quote engines / UIs.
  */
 
-import { IntegratedSmileModel } from './integratedSmileModel';
-import { ModelConfig } from './config/modelConfig';
+import { IntegratedSmileModel } from "./integratedSmileModel";
 
-// Standard quote engine interfaces
+// Request/response types
 export interface QuoteRequest {
   symbol: string;
   strike: number;
-  expiry: number;
-  side: 'BUY' | 'SELL' | 'BOTH';
+  expiryMs: number;               // absolute timestamp (ms)
+  optionType: "C" | "P";
+  side: "BUY" | "SELL" | "BOTH";
   size: number;
   clientId?: string;
+  marketIV?: number;              // optional ATM market IV (decimal)
 }
 
 export interface Quote {
   symbol: string;
   strike: number;
-  expiry: number;
+  expiryMs: number;
   bid: number;
   ask: number;
   bidSize: number;
   askSize: number;
   mid: number;
   edge: number;
-  volatility: number;
   timestamp: Date;
 }
 
 export interface Fill {
   symbol: string;
   strike: number;
-  expiry: number;
-  side: 'BUY' | 'SELL';
+  expiryMs: number;
+  side: "BUY" | "SELL";
   price: number;
   size: number;
   timestamp: Date;
@@ -45,323 +45,270 @@ export interface RiskMetrics {
   totalVega: number;
   totalGamma: number;
   totalTheta: number;
-  buckets: {
-    name: string;
-    vega: number;
-    gamma: number;
-    edge: number;
-  }[];
-  smileAdjustments: {
-    level: number;
-    skew: number;
-    leftWing: number;
-    rightWing: number;
-  };
+  buckets: { name: string; vega: number; gamma: number; edge: number }[];
+  smileAdjustments: { level: number; skew: number; leftWing: number; rightWing: number };
 }
 
-/**
- * Adapter class that bridges the vol model to quote engines
- */
 export class QuoteEngineAdapter {
   private model: IntegratedSmileModel;
   private symbol: string;
-  private spot: number;
+  private forward: number; // forward, not spot
+
   private callbackHandlers: {
     onQuoteUpdate?: (quotes: Quote[]) => void;
     onFill?: (fill: Fill) => void;
     onRiskUpdate?: (risk: RiskMetrics) => void;
   } = {};
 
-  constructor(
-    symbol: string,
-    spot: number,
-    config?: ModelConfig
-  ) {
+  constructor(symbol: string, forward: number) {
     this.symbol = symbol;
-    this.spot = spot;
-    this.model = new IntegratedSmileModel(config);
-    this.model.initialize({ spot });
+    this.forward = forward;
+    this.model = new IntegratedSmileModel(); // no initialize()
   }
 
-  /**
-   * Get a single quote
-   */
-  getQuote(request: QuoteRequest): Quote {
-    const quote = this.model.getQuote(
-      request.strike,
-      request.expiry
+  /** Get a single quote */
+  getQuote(req: QuoteRequest): Quote {
+    const q = this.model.getQuote(
+      req.expiryMs,
+      req.strike,
+      this.forward,
+      req.optionType,
+      req.marketIV
     );
 
-    // Adjust sizes based on request
-    let bidSize = quote.bidSize;
-    let askSize = quote.askSize;
-
-    if (request.side === 'BUY') {
-      askSize = Math.min(askSize, request.size);
-    } else if (request.side === 'SELL') {
-      bidSize = Math.min(bidSize, request.size);
-    }
+    // Size gating
+    let bidSize = q.bidSize;
+    let askSize = q.askSize;
+    if (req.side === "BUY") askSize = Math.min(askSize, req.size);
+    if (req.side === "SELL") bidSize = Math.min(bidSize, req.size);
 
     return {
       symbol: this.symbol,
-      strike: request.strike,
-      expiry: request.expiry,
-      bid: quote.bid,
-      ask: quote.ask,
+      strike: req.strike,
+      expiryMs: req.expiryMs,
+      bid: q.bid,
+      ask: q.ask,
       bidSize,
       askSize,
-      mid: (quote.bid + quote.ask) / 2,
-      edge: quote.edge,
-      volatility: quote.ccMid, // Using CC as the "fair" vol
-      timestamp: new Date()
+      mid: (q.bid + q.ask) / 2,
+      edge: q.edge,
+      timestamp: new Date(),
     };
   }
 
-  /**
-   * Get multiple quotes (for quote grids)
-   */
-  getQuoteGrid(
-    strikes: number[],
-    expiry: number
-  ): Quote[] {
-    return strikes.map(strike => 
+  /** Get multiple quotes (for quote grids) */
+  getQuoteGrid(strikes: number[], expiryMs: number, optionType: "C" | "P" = "C"): Quote[] {
+    return strikes.map((strike) =>
       this.getQuote({
         symbol: this.symbol,
         strike,
-        expiry,
-        side: 'BOTH',
-        size: 100
+        expiryMs,
+        optionType,
+        side: "BOTH",
+        size: 100,
       })
     );
   }
 
-  /**
-   * Execute a trade
-   */
+  /** Execute a trade (customer side) */
   executeTrade(
     strike: number,
-    expiry: number,
-    side: 'BUY' | 'SELL',
+    expiryMs: number,
+    side: "BUY" | "SELL",
     size: number,
     price?: number,
+    optionType: "C" | "P" = "C",
     clientId?: string
   ): Fill {
-    // Get current quote if no price specified
-    if (!price) {
-      const quote = this.getQuote({
+    // If no price given, take our current quote
+    if (price == null) {
+      const q = this.getQuote({
         symbol: this.symbol,
         strike,
-        expiry,
+        expiryMs,
+        optionType,
         side,
-        size
+        size,
       });
-      price = side === 'BUY' ? quote.ask : quote.bid;
+      price = side === "BUY" ? q.ask : q.bid;
     }
 
-    // Execute in the model
-    const execution = this.model.executeTrade(
+    // Signed size from CUSTOMER perspective (BUY means we SELL => negative)
+    const signedSize = side === "BUY" ? -Math.abs(size) : Math.abs(size);
+
+    // Inform the model
+    this.model.onTrade({
+      expiryMs,
       strike,
-      expiry,
-      side,
-      size,
-      price
-    );
+      forward: this.forward,
+      optionType,
+      price,
+      size: signedSize,
+      time: Date.now(),
+    });
 
     const fill: Fill = {
       symbol: this.symbol,
       strike,
-      expiry,
+      expiryMs,
       side,
-      price: execution.price,
-      size: execution.size,
+      price,
+      size,
       timestamp: new Date(),
-      clientId
+      clientId,
     };
 
-    // Trigger callbacks
     this.notifyFill(fill);
-    this.notifyQuoteUpdate(expiry);
+    this.notifyQuoteUpdate(expiryMs);
     this.notifyRiskUpdate();
 
     return fill;
   }
 
-  /**
-   * Get current risk metrics
-   */
+  /** Risk metrics proxy */
   getRiskMetrics(): RiskMetrics {
-    const inventory = (this.model as any).inventoryController.getInventory();
-    const smileAdj = (this.model as any).inventoryController.getSmileAdjustments();
-    
-    const buckets = Object.entries(inventory.byBucket).map(([name, metrics]: [string, any]) => ({
+    const inv = this.model.getInventorySummary();
+    const sa = inv.smileAdjustments;
+
+    const buckets = Object.entries(inv.byBucket || {}).map(([name, m]: [string, any]) => ({
       name,
-      vega: metrics.vega,
-      gamma: metrics.gamma,
-      edge: metrics.edgeRequired || 0
+      vega: m.vega ?? 0,
+      gamma: m.gamma ?? 0,
+      edge: m.edgeRequired ?? 0,
     }));
 
     return {
-      totalVega: inventory.total.vega,
-      totalGamma: inventory.total.gamma,
-      totalTheta: inventory.total.theta,
+      totalVega: inv.totalVega ?? 0,
+      totalGamma: 0,
+      totalTheta: 0,
       buckets,
       smileAdjustments: {
-        level: smileAdj.deltaL0,
-        skew: smileAdj.deltaS0,
-        leftWing: smileAdj.deltaSNeg,
-        rightWing: smileAdj.deltaSPos
-      }
+        level: sa.deltaL0,
+        skew: sa.deltaS0,
+        leftWing: sa.deltaSNeg,
+        rightWing: sa.deltaSPos,
+      },
     };
   }
 
-  /**
-   * Update spot price
-   */
-  updateSpot(newSpot: number): void {
-    this.spot = newSpot;
-    // You might want to recalculate all quotes here
+  /** Update forward (perp) */
+  updateForward(newForward: number): void {
+    this.forward = newForward;
     this.notifyQuoteUpdate();
   }
 
-  /**
-   * Register callback handlers
-   */
-  on(event: 'quote' | 'fill' | 'risk', handler: Function): void {
-    switch(event) {
-      case 'quote':
-        this.callbackHandlers.onQuoteUpdate = handler as any;
-        break;
-      case 'fill':
-        this.callbackHandlers.onFill = handler as any;
-        break;
-      case 'risk':
-        this.callbackHandlers.onRiskUpdate = handler as any;
-        break;
-    }
+  /** Events */
+  on(event: "quote" | "fill" | "risk", handler: Function): void {
+    if (event === "quote") this.callbackHandlers.onQuoteUpdate = handler as any;
+    if (event === "fill") this.callbackHandlers.onFill = handler as any;
+    if (event === "risk") this.callbackHandlers.onRiskUpdate = handler as any;
   }
 
-  /**
-   * Private notification methods
-   */
-  private notifyQuoteUpdate(expiry?: number): void {
-    if (this.callbackHandlers.onQuoteUpdate) {
-      // Get quotes for common strikes
-      const strikes = this.generateStrikeGrid(this.spot);
-      const quotes = this.getQuoteGrid(strikes, expiry || 0.08);
-      this.callbackHandlers.onQuoteUpdate(quotes);
-    }
+  /** Internals */
+  private defaultExpiryMs(): number {
+    // default: 1 week ahead
+    return Date.now() + 7 * 24 * 3600 * 1000;
+  }
+
+  private notifyQuoteUpdate(expiryMs?: number): void {
+    if (!this.callbackHandlers.onQuoteUpdate) return;
+    const strikes = this.generateStrikeGrid(this.forward);
+    const ems = expiryMs ?? this.defaultExpiryMs();
+    const quotes = this.getQuoteGrid(strikes, ems, "C");
+    this.callbackHandlers.onQuoteUpdate(quotes);
   }
 
   private notifyFill(fill: Fill): void {
-    if (this.callbackHandlers.onFill) {
-      this.callbackHandlers.onFill(fill);
-    }
+    this.callbackHandlers.onFill?.(fill);
   }
 
   private notifyRiskUpdate(): void {
-    if (this.callbackHandlers.onRiskUpdate) {
-      this.callbackHandlers.onRiskUpdate(this.getRiskMetrics());
-    }
+    this.callbackHandlers.onRiskUpdate?.(this.getRiskMetrics());
   }
 
-  private generateStrikeGrid(spot: number): number[] {
-    // Generate a standard strike grid
+  private generateStrikeGrid(base: number): number[] {
     const strikes: number[] = [];
-    const moneyness = [0.8, 0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.15, 1.2];
-    for (const m of moneyness) {
-      strikes.push(Math.round(spot * m));
-    }
+    const m = [0.8, 0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.15, 1.2];
+    for (const x of m) strikes.push(Math.round(base * x));
     return strikes;
   }
 
-  /**
-   * Utility method to format quotes for display
-   */
-  formatQuoteTable(strikes: number[], expiry: number): string {
-    const quotes = this.getQuoteGrid(strikes, expiry);
-    let table = 'Strike | Bid    | Ask    | Mid    | Edge  | Vol   | Size\n';
-    table += '-----------------------------------------------------------\n';
-    
+  /** Pretty-printer */
+  formatQuoteTable(strikes: number[], expiryMs: number): string {
+    const quotes = this.getQuoteGrid(strikes, expiryMs);
+    let table = "Strike | Bid    | Ask    | Mid    | Edge   | Size\n";
+    table += "--------------------------------------------------\n";
     for (const q of quotes) {
       table += `${q.strike.toString().padStart(6)} | `;
       table += `${q.bid.toFixed(2).padStart(6)} | `;
       table += `${q.ask.toFixed(2).padStart(6)} | `;
       table += `${q.mid.toFixed(2).padStart(6)} | `;
-      table += `${q.edge.toFixed(2).padStart(5)} | `;
-      table += `${(q.volatility * 100).toFixed(1).padStart(5)}% | `;
+      table += `${q.edge.toFixed(2).padStart(6)} | `;
       table += `${q.bidSize}/${q.askSize}\n`;
     }
-    
     return table;
   }
 }
 
-/**
- * Example WebSocket integration
- */
+/** Example WebSocket integration */
 export class WebSocketQuoteEngine {
   private adapter: QuoteEngineAdapter;
   private ws: any; // Your WebSocket implementation
 
-  constructor(symbol: string, spot: number) {
-    this.adapter = new QuoteEngineAdapter(symbol, spot);
-    
-    // Register callbacks
-    this.adapter.on('quote', (quotes) => this.broadcastQuotes(quotes));
-    this.adapter.on('fill', (fill) => this.broadcastFill(fill));
-    this.adapter.on('risk', (risk) => this.broadcastRisk(risk));
+  constructor(symbol: string, forward: number) {
+    this.adapter = new QuoteEngineAdapter(symbol, forward);
+    this.adapter.on("quote", (quotes) => this.broadcastQuotes(quotes));
+    this.adapter.on("fill", (fill) => this.broadcastFill(fill));
+    this.adapter.on("risk", (risk) => this.broadcastRisk(risk));
   }
 
   handleMessage(message: any): void {
-    switch(message.type) {
-      case 'QUOTE_REQUEST':
-        const quote = this.adapter.getQuote(message.data);
+    switch (message.type) {
+      case "QUOTE_REQUEST": {
+        // Expect: { strike, expiryMs, optionType, size, side }
+        const quote = this.adapter.getQuote({
+          symbol: (this.adapter as any)["symbol"],
+          strike: message.strike,
+          expiryMs: message.expiryMs,
+          optionType: message.optionType ?? "C",
+          side: message.side ?? "BOTH",
+          size: message.size ?? 100,
+          clientId: message.clientId,
+          marketIV: message.marketIV,
+        });
         this.sendQuote(message.clientId, quote);
         break;
-        
-      case 'TRADE':
+      }
+      case "TRADE": {
+        // Expect: { strike, expiryMs, optionType, side, size, price? }
         const fill = this.adapter.executeTrade(
           message.strike,
-          message.expiry,
+          message.expiryMs,
           message.side,
           message.size,
           message.price,
+          message.optionType ?? "C",
           message.clientId
         );
         break;
-        
-      case 'SPOT_UPDATE':
-        this.adapter.updateSpot(message.spot);
+      }
+      case "FORWARD_UPDATE": {
+        this.adapter.updateForward(message.forward);
         break;
+      }
     }
   }
 
   private broadcastQuotes(quotes: Quote[]): void {
-    // Broadcast to all connected clients
-    this.ws?.broadcast({
-      type: 'QUOTES',
-      data: quotes
-    });
+    this.ws?.broadcast({ type: "QUOTES", data: quotes });
   }
-
   private broadcastFill(fill: Fill): void {
-    this.ws?.broadcast({
-      type: 'FILL',
-      data: fill
-    });
+    this.ws?.broadcast({ type: "FILL", data: fill });
   }
-
   private broadcastRisk(risk: RiskMetrics): void {
-    this.ws?.broadcast({
-      type: 'RISK_UPDATE',
-      data: risk
-    });
+    this.ws?.broadcast({ type: "RISK_UPDATE", data: risk });
   }
-
   private sendQuote(clientId: string, quote: Quote): void {
-    this.ws?.send(clientId, {
-      type: 'QUOTE_RESPONSE',
-      data: quote
-    });
+    this.ws?.send(clientId, { type: "QUOTE_RESPONSE", data: quote });
   }
 }

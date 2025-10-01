@@ -126,12 +126,33 @@ export async function startIngest(prisma: PrismaClient) {
         }).catch((e) => {
           console.error("[ingest] index save error:", e);
         });
+        
+        // NEW: Save to ticker table for marketRecorder
+        await prisma.ticker.create({
+          data: {
+            tsMs,
+            instrument: "BTC-PERPETUAL",
+            markPrice: price,
+            bestBid: null,
+            bestAsk: null,
+            underlying: price,
+            markIv: null
+          }
+        }).catch((e) => {
+          console.error("[ingest] perp ticker save error:", e);
+        });
       }
       return;
     }
 
     if (channel.startsWith("ticker.")) {
       const name = data.instrument_name as string;
+      console.log(`[WS RAW] ${name}:`, {
+        best_bid: data.best_bid_price,
+        best_ask: data.best_ask_price,
+        mark_price: data.mark_price,
+        mark_iv: data.mark_iv
+      });
       const markIv = typeof data.mark_iv === "number" ? data.mark_iv : null;
       const markPrice = typeof data.mark_price === "number" ? data.mark_price : null;
       const bestBid = typeof data.best_bid_price === "number" ? data.best_bid_price : null;

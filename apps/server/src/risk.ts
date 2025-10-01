@@ -14,17 +14,32 @@ const N = (x:number)=>0.5*(1+erf(x/Math.SQRT2));
 const n = (x:number)=>Math.exp(-0.5*x*x)/Math.sqrt(2*Math.PI);
 
 // ---- Black-76 greeks (futures options)
-export function black76Greeks(F:number,K:number,T:number,sigma:number,isCall:boolean,df=1){
-  const sT = Math.max(1e-12, sigma*Math.sqrt(Math.max(T,1e-12)));
-  const d1 = (Math.log(F/K)+0.5*sigma*sigma*T)/sT;
+export function black76Greeks(
+  F: number,
+  K: number,
+  T: number,
+  sigma: number,
+  isCall: boolean,
+  df = 1
+) {
+  const sT = Math.max(1e-12, sigma * Math.sqrt(Math.max(T, 1e-12)));
+  const d1 = (Math.log(F / K) + 0.5 * sigma * sigma * T) / sT;
   const d2 = d1 - sT;
   const pdf = n(d1);
-  const delta = (isCall? N(d1) : (N(d1)-1)) * df;
-  const gamma = df * pdf / (F*sT);
-  const vega  = df * F * pdf * Math.sqrt(Math.max(T,1e-12));
-  const theta = - df * (F*pdf*sigma/(2*Math.sqrt(T))); // minimal (no carry)
-  return { delta, gamma, vega, theta, d1, d2 };
+
+  // price (Black 76, discounted by df)
+  const callPrice = df * (F * N(d1) - K * N(d2));
+  const putPrice  = df * (K * N(-d2) - F * N(-d1));
+  const price = isCall ? callPrice : putPrice;
+
+  const delta = (isCall ? N(d1) : (N(d1) - 1)) * df;
+  const gamma = (df * pdf) / (F * sT);
+  const vega  = df * F * pdf * Math.sqrt(Math.max(T, 1e-12));
+  const theta = -df * (F * pdf * sigma / (2 * Math.sqrt(T))); // minimal (no carry)
+
+  return { price, delta, gamma, vega, theta, d1, d2 };
 }
+
 
 // ---- helpers to fetch most recent market marks
 export async function getLatestIndex(prisma: PrismaClient, indexName="btc_usd"){
