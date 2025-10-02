@@ -239,6 +239,65 @@ return adjustedSVI;
       smileAdjustments: this.calculateSmileAdjustments()
     };
   }
+  // Return required edge (ticks) for a bucket given *our* signed vega
+  getRequiredEdgeForBucket(bucket: string, signedVega: number): number {
+    const cfg = this.config.buckets.find(b => b.name === bucket);
+    if (!cfg) return 0;
+    const { E0, kappa, gamma, Vref } = cfg.edgeParams;
+    const sign = -Math.sign(signedVega); // short vega → want PC > CC (positive edge)
+    const normalized = Math.abs(signedVega) / Math.max(Vref, 1e-6);
+    return sign * (E0 + kappa * Math.pow(normalized, gamma));
+  }
+
+  // Solve ridge-regularized RBF alphas (tiny helper)
+  solveRbfAlphas(
+    targets: Array<{ k: number; deltaW: number }>,
+    centers: number[],
+    width: number,
+    ridgeLambda: number
+  ): number[] {
+    const n = targets.length, m = centers.length;
+    if (n === 0 || m === 0) return Array(m).fill(0);
+
+    const Phi: number[][] = Array.from({ length: n }, () => Array(m).fill(0));
+    const y: number[] = targets.map(t => t.deltaW);
+
+    for (let i = 0; i < n; i++) {
+      const ki = targets[i].k;
+      for (let j = 0; j < m; j++) {
+        const d = (ki - centers[j]) / width;
+        Phi[i][j] = Math.exp(-0.5 * d * d);
+      }
+    }
+
+    // (Phi'Phi + λI) a = Phi' y
+    const Pt = (A:number[][])=>A[0].map((_,j)=>A.map(r=>r[j]));
+    const mul = (A:number[][],B:number[][])=>A.map(r=>B[0].map((_,j)=>r.reduce((s,v,k)=>s+v*B[k][j],0)));
+    const addRidge = (M:number[][],lam:number)=>M.map((r,i)=>r.map((v,j)=>v+(i===j?lam:0)));
+
+    const PhiT = Pt(Phi);
+    const A = addRidge(mul(PhiT,Phi), ridgeLambda);
+    const bcol = mul(PhiT, [y.map(v=>v)]).map(r=>r[0]);
+
+    // Gaussian elimination (small m)
+    const aug = A.map((row,i)=>[...row, bcol[i]]);
+    for (let i=0;i<m;i++){
+      let p=i;
+      for (let r=i+1;r<m;r++) if (Math.abs(aug[r][i])>Math.abs(aug[p][i])) p=r;
+      [aug[i],aug[p]]=[aug[p],aug[i]];
+      for (let r=i+1;r<m;r++){
+        const f = aug[r][i]/(aug[i][i]||1e-12);
+        for (let c=i;c<=m;c++) aug[r][c]-=f*aug[i][c];
+      }
+    }
+    const a = Array(m).fill(0);
+    for (let i=m-1;i>=0;i--){
+      let s = aug[i][m];
+      for (let c=i+1;c<m;c++) s -= aug[i][c]*a[c];
+      a[i] = s/(aug[i][i]||1e-12);
+    }
+    return a;
+  }
   
   /**
    * Clear inventory

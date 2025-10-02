@@ -3,11 +3,19 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "workspaces": ["apps/*"],
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "npm run test -ws",
+    "test:server": "npm --workspace @omm/server run test",
+    "dev:server": "npm --workspace @omm/server run dev",
+    "context": "Scripts/context.sh",
+    "context:lite": "Scripts/context.sh context-pack-lite.txt lite",
+    "context:split": "Scripts/context.sh context-pack.txt split",
+    "backtest": "bash apps/server/run-backtest.sh"
   },
   "dependencies": {
     "@tailwindcss/postcss": "^4.1.13",
@@ -19,6 +27,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.33.0",
+    "@types/jest": "^30.0.0",
     "@types/react": "^19.1.10",
     "@types/react-dom": "^19.1.7",
     "@vitejs/plugin-react": "^5.0.0",
@@ -27,8 +36,10 @@
     "eslint-plugin-react-hooks": "^5.2.0",
     "eslint-plugin-react-refresh": "^0.4.20",
     "globals": "^16.3.0",
+    "jest": "^30.2.0",
     "postcss": "^8.5.6",
     "tailwindcss": "^4.1.13",
+    "ts-jest": "^29.4.4",
     "vite": "^7.1.2"
   }
 }

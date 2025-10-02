@@ -82,22 +82,43 @@ export async function startIngest(prisma: PrismaClient) {
         t += 1;
         f += Math.sin(t/10)*5 + (Math.random()-0.5)*10;
         const tsMs = BigInt(Date.now());
-        
-        console.log(`[ingest] Mock tick ${t}: price=${f.toFixed(2)}`);
-        await prisma.tickIndex.create({ data: { tsMs, indexName:"btc_usd", price: f } }).catch((e) => {
+
+        // Save an index print (btc_usd) — useful for risk
+        await prisma.tickIndex.create({
+          data: { tsMs, indexName:"btc_usd", price: f }
+        }).catch((e) => {
           console.error("[ingest] Index save error:", e);
         });
 
+        // ✅ NEW: also save a BTC-PERPETUAL ticker row for the backtester heartbeat
+        await prisma.ticker.create({
+          data: {
+            tsMs,
+            instrument: "BTC-PERPETUAL",
+            markPrice: f,
+            bestBid: null,
+            bestAsk: null,
+            underlying: f,
+            markIv: null
+          }
+        }).catch((e) => {
+          console.error("[ingest] Perp ticker save error:", e);
+        });
+
+        // Option IV wiggle
         const mIv = 0.5 + 0.05*Math.sin(t/30);
+
+        // Save three option tickers
         for (const n of [nameATM, nameCW, namePW]) {
           await prisma.ticker.create({
             data: {
               tsMs, instrument: n,
-              markIv: mIv, markPrice: 100 + Math.sin(t/20)*2 + (Math.random()-0.5),
+              markIv: mIv,
+              markPrice: 100 + Math.sin(t/20)*2 + (Math.random()-0.5),
               bestBid: 99, bestAsk: 101, underlying: f
             }
           }).catch((e) => {
-            console.error("[ingest] Ticker save error:", e);
+            console.error("[ingest] Option ticker save error:", e);
           });
         }
         await sleep(250);
@@ -112,22 +133,17 @@ export async function startIngest(prisma: PrismaClient) {
 
   const ws = new DeribitWS(async (channel, data) => {
     const tsMs = BigInt(Date.now());
-    console.log(`[ingest] received: ${channel}`, data);
-
     // BTC perp: use 100ms public stream
     if (channel === "ticker.BTC-PERPETUAL.100ms") {
       const price = typeof data.underlying_price === "number" ? data.underlying_price
                    : typeof data.index_price === "number" ? data.index_price
                    : undefined;
       if (typeof price === "number") {
-        console.log(`[ingest] saving index price: ${price}`);
         await prisma.tickIndex.create({
           data: { tsMs, indexName: "btc_usd", price }
         }).catch((e) => {
           console.error("[ingest] index save error:", e);
         });
-        
-        // NEW: Save to ticker table for marketRecorder
         await prisma.ticker.create({
           data: {
             tsMs,
@@ -147,18 +163,11 @@ export async function startIngest(prisma: PrismaClient) {
 
     if (channel.startsWith("ticker.")) {
       const name = data.instrument_name as string;
-      console.log(`[WS RAW] ${name}:`, {
-        best_bid: data.best_bid_price,
-        best_ask: data.best_ask_price,
-        mark_price: data.mark_price,
-        mark_iv: data.mark_iv
-      });
       const markIv = typeof data.mark_iv === "number" ? data.mark_iv : null;
       const markPrice = typeof data.mark_price === "number" ? data.mark_price : null;
       const bestBid = typeof data.best_bid_price === "number" ? data.best_bid_price : null;
       const bestAsk = typeof data.best_ask_price === "number" ? data.best_ask_price : null;
       const underlying = typeof data.underlying_price === "number" ? data.underlying_price : null;
-      console.log(`[ingest] saving ticker: ${name}, markIv: ${markIv}, underlying: ${underlying}`);
       await prisma.ticker.create({
         data: { tsMs, instrument: name, markIv, markPrice, bestBid, bestAsk, underlying }
       }).catch((e) => {

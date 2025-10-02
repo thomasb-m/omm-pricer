@@ -65,3 +65,12 @@ model Fill {
   qty         Float                 // positive number (direction by side)
   fee         Float?                // optional
 }
+
+model MarketSnapshot {
+  id        Int      @id @default(autoincrement())
+  timestamp BigInt
+  symbol    String
+  data      String   // JSON blob
+  
+  @@index([timestamp, symbol])
+}

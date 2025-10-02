@@ -1,0 +1,2518 @@
+
+----- FILE: SUMMARY.md -----
+
+### OMM Pricer Context Pack
+Generated on: Thu  2 Oct 2025 12:14:08 BST
+Git: branch=main, commit=f9740d6 Final cleanups: proxyMid/sanePrice fix, removed redeclarations
+
+---
+
+## 🔹 Context Summary
+
+We are building the **OMM pricer backend** in TypeScript/Node with a single “calculus” that ties together:
+- **Core curve (CC)** — fair value surface (SVI-based).
+- **Pricing curve (PC)** — CC plus inventory/trader adjustments.
+- **Widths (bid/ask)** — function of factor exposure and inventory pressure.
+- **Propagation** — change one thing (fills, nudges, F, time) → consistent shifts across the book.
+
+**Key types**
+- Factors (θ): `[L0, S0, C0, S_neg, S_pos, F]`
+- Factor greeks gᵢ(strike, T, F) = ∂Price/∂θᵢ
+- Costs λᵢ (ticks per unit factor exposure)
+- Inventory Iᵢ (aggregate exposure along each factor)
+
+**Core identities**
+- `PC_mid = CC_mid + dot(λ, g)`
+- `width = w0 + α·|dot(λ, g)| + β·invPressure(I)`
+- Trade update: `I ← I + q · g` (q>0 long)
+- Propagation (nudge): `ΔP ≈ G · Δθ`, where `G` is Jacobian over grid
+
+---
+
+## 🗺️ Minimal Roadmap (weeks)
+
+**W1**: factor greeks (finite diff), λ/I wiring, PC/width from λ·g, logging, limits skeleton  
+**W2**: close-form SVI partials, smoothing λ, latency trims  
+**W3**: backtest 7–30D, fit λ via ridge to realized slippage, fee model, guards  
+**W4**: surface visualizer, param sweeps, runbook
+
+---
+
+## ✅ Immediate Tasks (implemented/ready to scaffold)
+1) Add factor calculus scaffolding (, ) with finite-difference gᵢ.
+2) Store λ and I per symbol in volModelService. Update I on trade. Expose via .
+3) Compute PC mid, width via λ·g (keep sanity clamps).
+4) Observability: log {F,K,T, ccMid, pcMid, λ·g, width, I, bucket}.
+5) Limits: soft/hard on Iᵢ → widen/stop/emit-hedge-signal.
+
+
+
+----- FILE: apps/server/src/index.ts -----
+
+import Fastify from "fastify";
+import cors from "@fastify/cors";
+import "dotenv/config";
+import { PrismaClient } from "@prisma/client";
+import { startIngest } from "./ingest";
+import { computePortfolioRisk, computeRealizedPnL } from "./risk";
+import { quoteEngine, initializeWithMarketData } from "./quoteEngine";
+import { MarketRecorder } from "./replay/marketRecorder";
+import { Backtester, PassiveMMStrategy, InventoryAwareStrategy } from "./replay/backtester";
+
+const YEAR_MS = 365.25 * 24 * 3600 * 1000;
+const ensureMs = (expiryOrYears?: number) =>
+  expiryOrYears && expiryOrYears > 1e10
+    ? Math.floor(expiryOrYears)
+    : Math.floor(Date.now() + (expiryOrYears ?? 0.08) * YEAR_MS);
+
+
+async function main() {
+  console.log(`[server] PORT=${process.env.PORT} NETWORK=${process.env.DERIBIT_NETWORK} MOCK=${process.env.MOCK_MODE}`);
+  
+  // Enable mock mode for testing
+  if (!process.env.MOCK_MODE) {
+    process.env.MOCK_MODE = "1";
+    console.log("[server] Enabling MOCK_MODE for testing");
+  }
+  
+  const app = Fastify({ logger: true });
+  await app.register(cors, { origin: true });
+
+  const prisma = new PrismaClient();
+
+  // Kick off ingest (fire-and-forget)
+  console.log("[server] Starting ingest process...");
+  startIngest(prisma).catch(err => {
+    console.error("INGEST ERROR:", err);
+  });
+
+  const recorder = new MarketRecorder(prisma);
+  await initializeWithMarketData(prisma);
+  recorder.startRecording("BTC", 60000);
+
+  app.get("/health", async () => ({ ok: true, ts: Date.now() }));
+
+  // === RISK & PNL ===
+  app.get("/risk/greeks", async () => {
+    return await computePortfolioRisk(prisma);
+  });
+
+  app.get("/pnl", async () => {
+    const realized = await computeRealizedPnL(prisma);
+    const port = await computePortfolioRisk(prisma);
+    return {
+      realized,
+      unrealized: port.totals.unrealized,
+      total: realized + port.totals.unrealized,
+      totals: port.totals,
+      legs: port.legs
+    };
+  });
+
+
+
+  // Set / replace positions (for quick testing)
+  app.post<{
+    Body: { positions: Array<{ instrument:string; qty:number; avgPrice:number }> }
+  }>("/positions/set", async (req, res) => {
+    const { positions } = req.body;
+    if(!Array.isArray(positions)) return res.status(400).send({ error:"positions must be array" });
+
+    // upsert each
+    for(const p of positions){
+      await prisma.position.upsert({
+        where: { instrument: p.instrument },
+        create: { instrument: p.instrument, qty: p.qty, avgPrice: p.avgPrice },
+        update: { qty: p.qty, avgPrice: p.avgPrice, updatedAt: new Date() }
+      });
+    }
+    return { ok:true, count: positions.length };
+  });
+
+  // Optional: add a dummy seed for quick demo
+  app.post("/positions/seed-demo", async () => {
+    // pick instruments we already subscribed to or any from /instruments
+    const ins = await prisma.instrument.findMany({ take: 3 });
+    if(ins.length === 0) return { ok:false, msg:"no instruments in DB yet" };
+    const payload = ins.slice(0,3).map((m,i)=>({
+      instrument: m.id,
+      qty: (i===0? +5 : i===1? -3 : +2),
+      avgPrice: 100 // placeholder, real fills will update this
+    }));
+    for(const p of payload){
+      await prisma.position.upsert({
+        where:{ instrument:p.instrument },
+        create: p,
+        update: { qty:p.qty, avgPrice:p.avgPrice }
+      });
+    }
+    return { ok:true, positions: payload };
+  });
+
+  // List instruments we've upserted
+  app.get("/instruments", async () => {
+    const rows = await prisma.instrument.findMany({ orderBy: { name: "asc" }});
+    return rows;
+  });
+
+  // Latest N ticker rows for an instrument
+  app.get<{
+    Params: { instrument: string }; Querystring: { limit?: string }
+  }>("/tickers/:instrument", async (req) => {
+    const limit = Math.min(500, Math.max(1, Number(req.query.limit ?? "50")));
+    const rows = await prisma.ticker.findMany({
+      where: { instrument: req.params.instrument },
+      orderBy: { tsMs: "desc" },
+      take: limit
+    });
+    return rows;
+  });
+
+  // Latest index prints
+  app.get<{
+    Params: { indexName: string }; Querystring: { limit?: string }
+  }>("/index/:indexName", async (req) => {
+    const limit = Math.min(500, Math.max(1, Number(req.query.limit ?? "50")));
+    const rows = await prisma.tickIndex.findMany({
+      where: { indexName: req.params.indexName },
+      orderBy: { tsMs: "desc" },
+      take: limit
+    });
+    return rows;
+  });
+
+ // === VOLATILITY MODEL QUOTES ===
+
+// Get single quote
+app.post<{ Body: {
+  symbol: string; strike: number; expiryMs: number; optionType: 'C'|'P';
+  size?: number; side?: 'BUY'|'SELL'; marketIV?: number;
+} }>("/quote", async (req) => {
+  const { symbol='BTC', strike, expiryMs, optionType='C', size, side, marketIV } = req.body;
+  return quoteEngine.getQuote({ symbol, strike, expiryMs, optionType, size, side, marketIV });
+});
+
+// Get quote grid
+app.post<{ Body: { symbol: string; strikes: number[]; expiryMs: number; optionType?: 'C'|'P' } }>(
+  "/quote/grid", async (req) => {
+    const { symbol='BTC', strikes, expiryMs, optionType='C' } = req.body;
+    return quoteEngine.getQuoteGrid(symbol, strikes, expiryMs, optionType);
+  }
+);
+
+// Execute trade (update vol model)
+app.post<{ Body: {
+  symbol: string; strike: number; expiryMs: number; optionType: 'C'|'P';
+  side: 'BUY'|'SELL'; size: number; price: number;
+} }>("/trade/execute", async (req) => {
+  const trade = { ...req.body, timestamp: Date.now() };
+  quoteEngine.executeTrade(trade);
+  const inv = quoteEngine.getInventory(trade.symbol);
+  return { success: true, trade, inventory: inv };
+});
+
+// Update forward (perp)
+app.post<{ Body: { symbol: string; forward: number } }>(
+  "/forward/update", async (req) => {
+    const { symbol, forward } = req.body;
+    // keep both the quote engine and vol model in sync
+    quoteEngine.updateForward(symbol, forward);
+    // If you have volService imported here, also sync it:
+    // volService.updateSpot(symbol, forward);
+    return { success: true, symbol, forward };
+  }
+);
+
+
+  // Get current inventory
+  app.get<{
+    Querystring: { symbol?: string }
+  }>("/inventory", async (req) => {
+    const symbol = req.query.symbol || 'BTC';
+    const inv = quoteEngine.getInventory(symbol);
+    return inv;
+  });
+
+  // === BACKTEST ENDPOINTS ===
+
+  // Run a backtest
+  app.post<{
+    Body: { 
+      strategy: string;
+      symbol: string;
+      startTime: number;
+      endTime: number;
+    }
+  }>("/backtest/run", async (req) => {
+    const { strategy = "passive", symbol = "BTC", startTime, endTime } = req.body;
+    
+    const backtester = new Backtester(prisma);
+    
+    // Select strategy
+    let strat;
+    if (strategy === "passive") {
+      strat = new PassiveMMStrategy(1000, 100, 10);
+    } else if (strategy === "inventory") {
+      strat = new InventoryAwareStrategy(50, 2000);
+    } else {
+      return { error: "Unknown strategy" };
+    }
+    
+    const results = await backtester.runBacktest(strat, symbol, startTime, endTime);
+    return results;
+  });
+
+  // Get available snapshots
+  app.get<{
+    Querystring: { symbol?: string; limit?: number }
+  }>("/snapshots/list", async (req) => {
+    const symbol = req.query.symbol || "BTC";
+    const limit = parseInt(req.query.limit as string) || 100;
+    
+    const snapshots = await prisma.marketSnapshot.findMany({
+      where: { symbol },
+      orderBy: { timestamp: "desc" },
+      take: limit,
+      select: { timestamp: true, id: true }
+    });
+    
+    return snapshots;
+  });
+
+  app.get("/debug/snapshot-latest", async () => {
+    const latest = await prisma.marketSnapshot.findFirst({
+      where: { symbol: "BTC" },
+      orderBy: { timestamp: "desc" }
+    });
+    
+    if (!latest) return { error: "No snapshots" };
+    
+    const data = JSON.parse(latest.data);
+    
+    return {
+      timestamp: new Date(data.timestamp),
+      forward: data.forward,
+      spot: data.spot,
+      optionCount: data.options.length,
+      sampleOptions: data.options.slice(0, 5).map((o: any) => ({
+        instrument: o.instrument,
+        strike: o.strike,
+        bid: o.bid,
+        ask: o.ask,
+        spread: o.ask - o.bid,
+        bidSize: o.bidSize,
+        askSize: o.askSize
+      }))
+    };
+  });
+
+  // Factors: read lambda & inventory
+  app.get<{ Querystring: { symbol?: string } }>("/risk/factors", async (req) => {
+    const symbol = req.query.symbol || "BTC";
+    // lazy import here to avoid circulars at top
+    const { volService } = await import("./volModels/integration/volModelService");
+    return { symbol, ...volService.getFactors(symbol) };
+  });
+
+  // Set lambda (for quick experiments)
+  app.post<{ Body: { symbol: string; lambda: [number,number,number,number,number,number] } }>(
+    "/risk/factors/set-lambda",
+    async (req) => {
+      const { symbol, lambda } = req.body;
+      const { volService } = await import("./volModels/integration/volModelService");
+      return volService.setLambda(symbol, lambda);
+    }
+  );
+
+  // Clear factor inventory
+  app.post<{ Body: { symbol: string } }>("/risk/factors/clear", async (req) => {
+    const { symbol } = req.body;
+    const { volService } = await import("./volModels/integration/volModelService");
+    return volService.clearInventory(symbol);
+  });
+
+
+  // Manually capture snapshot
+  app.post("/snapshots/capture", async (req) => {
+    const snapshot = await recorder.captureSnapshot("BTC");
+    await recorder.saveSnapshot(snapshot);
+    return { success: true, snapshot };
+  });
+
+  const port = Number(process.env.PORT || 3001);
+  await app.listen({ port, host: "0.0.0.0" });
+  console.log(`server up http://localhost:${port}`);
+}
+
+main().catch((err) => {
+  console.error("FATAL:", err);
+  process.exit(1);
+});
+
+----- FILE: apps/server/src/ingest.ts -----
+
+import { PrismaClient } from "@prisma/client";
+import { DeribitWS } from "./deribit";
+
+type Picked = { atm: any; wingC: any; wingP: any; expiryMs: number };
+
+function chooseThree(list: any[], spot: number): Picked | null {
+  const now = Date.now();
+  const targetDays = 7;
+  let bestExpTs: number | null = null, bestExpDiff = Infinity;
+  const byExp = new Map<number, any[]>();
+  for (const ins of list) {
+    const ts = ins.expiration_timestamp;
+    if (!byExp.has(ts)) byExp.set(ts, []);
+    byExp.get(ts)!.push(ins);
+    const days = (ts - now) / (1000*60*60*24);
+    const diff = Math.abs(days - targetDays);
+    if (diff < bestExpDiff) { bestExpDiff = diff; bestExpTs = ts; }
+  }
+  if (!bestExpTs) return null;
+
+  const bucket = byExp.get(bestExpTs)!;
+  let atm: any=null, atmDiff=Infinity;
+  let wingC: any=null, wingCDiff=Infinity, targetC=spot*1.10;
+  let wingP: any=null, wingPDiff=Infinity, targetP=spot*0.90;
+
+  for (const ins of bucket) {
+    const d = Math.abs(ins.strike - spot);
+    if (d < atmDiff) { atm = ins; atmDiff = d; }
+    if (ins.strike >= targetC) {
+      const dc = Math.abs(ins.strike - targetC);
+      if (dc < wingCDiff && (ins.option_type === "call" || wingC === null)) {
+        wingC = ins; wingCDiff = dc;
+      }
+    }
+    if (ins.strike <= targetP) {
+      const dp = Math.abs(ins.strike - targetP);
+      if (dp < wingPDiff && (ins.option_type === "put" || wingP === null)) {
+        wingP = ins; wingPDiff = dp;
+      }
+    }
+  }
+  if (!wingC) wingC = atm;
+  if (!wingP) wingP = atm;
+  return { atm, wingC, wingP, expiryMs: bestExpTs! };
+}
+
+function sleep(ms:number){ return new Promise(r=>setTimeout(r,ms)); }
+
+export async function startIngest(prisma: PrismaClient) {
+  // Make BigInt printable in JSON
+  (BigInt.prototype as any).toJSON = function(){ return Number(this) };
+
+  // MOCK MODE (no network, always produces data)
+  if (process.env.MOCK_MODE === "1") {
+    console.log("[ingest] MOCK_MODE=1 — generating fake ticks");
+    console.log("[ingest] Mock mode enabled, starting data generation...");
+    const nameATM = "MOCK-BTC-7D-ATM-C";
+    const nameCW  = "MOCK-BTC-7D-110C";
+    const namePW  = "MOCK-BTC-7D-090P";
+
+    // upsert instruments
+    const now = Date.now();
+    const expiryMs = BigInt(now + 7*24*3600*1000);
+    for (const [n, strike, type] of [
+      [nameATM, 100_000, "call"],
+      [nameCW,  110_000, "call"],
+      [namePW,   90_000, "put" ],
+    ] as const) {
+      await prisma.instrument.upsert({
+        where: { id: n },
+        create: { id: n, name: n, kind: "option", currency: "BTC", strike, optionType: type, expiryMs },
+        update: {}
+      });
+    }
+
+    // mock generator
+    let f = 100_000;
+    let t = 0;
+    console.log("[ingest] Starting mock data generation loop...");
+    (async () => {
+      while (true) {
+        t += 1;
+        f += Math.sin(t/10)*5 + (Math.random()-0.5)*10;
+        const tsMs = BigInt(Date.now());
+        
+        console.log(`[ingest] Mock tick ${t}: price=${f.toFixed(2)}`);
+        await prisma.tickIndex.create({ data: { tsMs, indexName:"btc_usd", price: f } }).catch((e) => {
+          console.error("[ingest] Index save error:", e);
+        });
+
+        const mIv = 0.5 + 0.05*Math.sin(t/30);
+        for (const n of [nameATM, nameCW, namePW]) {
+          await prisma.ticker.create({
+            data: {
+              tsMs, instrument: n,
+              markIv: mIv, markPrice: 100 + Math.sin(t/20)*2 + (Math.random()-0.5),
+              bestBid: 99, bestAsk: 101, underlying: f
+            }
+          }).catch((e) => {
+            console.error("[ingest] Ticker save error:", e);
+          });
+        }
+        await sleep(250);
+      }
+    })();
+    return;
+  }
+
+  // REAL WS MODE
+  const network = (process.env.DERIBIT_NETWORK || "mainnet").toLowerCase();
+  console.log(`[ingest] network=${network}`);
+
+  const ws = new DeribitWS(async (channel, data) => {
+    const tsMs = BigInt(Date.now());
+    console.log(`[ingest] received: ${channel}`, data);
+
+    // BTC perp: use 100ms public stream
+    if (channel === "ticker.BTC-PERPETUAL.100ms") {
+      const price = typeof data.underlying_price === "number" ? data.underlying_price
+                   : typeof data.index_price === "number" ? data.index_price
+                   : undefined;
+      if (typeof price === "number") {
+        console.log(`[ingest] saving index price: ${price}`);
+        await prisma.tickIndex.create({
+          data: { tsMs, indexName: "btc_usd", price }
+        }).catch((e) => {
+          console.error("[ingest] index save error:", e);
+        });
+        
+        // NEW: Save to ticker table for marketRecorder
+        await prisma.ticker.create({
+          data: {
+            tsMs,
+            instrument: "BTC-PERPETUAL",
+            markPrice: price,
+            bestBid: null,
+            bestAsk: null,
+            underlying: price,
+            markIv: null
+          }
+        }).catch((e) => {
+          console.error("[ingest] perp ticker save error:", e);
+        });
+      }
+      return;
+    }
+
+    if (channel.startsWith("ticker.")) {
+      const name = data.instrument_name as string;
+      console.log(`[WS RAW] ${name}:`, {
+        best_bid: data.best_bid_price,
+        best_ask: data.best_ask_price,
+        mark_price: data.mark_price,
+        mark_iv: data.mark_iv
+      });
+      const markIv = typeof data.mark_iv === "number" ? data.mark_iv : null;
+      const markPrice = typeof data.mark_price === "number" ? data.mark_price : null;
+      const bestBid = typeof data.best_bid_price === "number" ? data.best_bid_price : null;
+      const bestAsk = typeof data.best_ask_price === "number" ? data.best_ask_price : null;
+      const underlying = typeof data.underlying_price === "number" ? data.underlying_price : null;
+      console.log(`[ingest] saving ticker: ${name}, markIv: ${markIv}, underlying: ${underlying}`);
+      await prisma.ticker.create({
+        data: { tsMs, instrument: name, markIv, markPrice, bestBid, bestAsk, underlying }
+      }).catch((e) => {
+        console.error("[ingest] ticker save error:", e);
+      });
+      return;
+    }
+  });
+
+  console.log("[ingest] connecting ws…");
+  await ws.connect(network);
+
+  // Subscribe to public (non-auth) channels
+  await ws.subscribe(["ticker.BTC-PERPETUAL.100ms"]);
+  const idx = await ws.getIndexPrice("btc_usd").catch(()=>null);
+  const spot = idx?.index_price as number | undefined;
+  if (typeof spot !== "number") {
+    console.error("[ingest] no spot index price; is the network blocking WS?");
+    return;
+  }
+  console.log("[ingest] spot index:", spot);
+
+  // Load instruments and pick ATM + wings
+  const list = await ws.getInstruments("BTC", "option", false).catch(()=>[]);
+  const picked = chooseThree(list, spot);
+  if (!picked) { console.warn("[ingest] Could not pick ATM + wings"); return; }
+
+  for (const m of [picked.atm, picked.wingC, picked.wingP]) {
+    await prisma.instrument.upsert({
+      where: { id: m.instrument_name },
+      create: {
+        id: m.instrument_name,
+        name: m.instrument_name,
+        kind: "option",
+        currency: m.currency || "BTC",
+        strike: m.strike ?? null,
+        optionType: m.option_type ?? null,
+        expiryMs: BigInt(m.expiration_timestamp),
+      },
+      update: {}
+    }).catch(()=>{});
+  }
+
+  const wanted = [
+    picked.atm.instrument_name,
+    picked.wingC.instrument_name,
+    picked.wingP.instrument_name,
+  ];
+  await ws.subscribe(wanted.map(n => `ticker.${n}.100ms`));
+  console.log("[ingest] subscribed:", wanted.join(", "));
+}
+
+----- FILE: apps/server/src/quoteEngine.ts -----
+
+// apps/server/src/quoteEngine.ts
+import { PrismaClient } from "@prisma/client";
+import { volService } from './volModels/integration/volModelService';
+
+export interface QuoteRequest {
+  symbol: string;
+  strike: number;
+  expiryMs: number;                 // absolute ms
+  optionType: 'C' | 'P';
+  size?: number;
+  side?: 'BUY' | 'SELL';
+  marketIV?: number;                // ATM IV (decimal) to calibrate
+}
+
+export interface Quote {
+  symbol: string;
+  strike: number;
+  expiryMs: number;
+  optionType: 'C'|'P';
+  bid: number;
+  ask: number;
+  bidSize: number;
+  askSize: number;
+  mid: number;
+  spread: number;
+  edge: number;
+  forward: number;
+  timestamp: number;
+  pcMid?: number;
+  ccMid?: number;
+  bucket?: string;
+}
+
+export interface Trade {
+  symbol: string;
+  strike: number;
+  expiryMs: number;
+  optionType: 'C'|'P';
+  side: 'BUY' | 'SELL';             // CUSTOMER side
+  size: number;
+  price: number;
+  timestamp: number;
+}
+
+export class QuoteEngine {
+  private forwards: Map<string, number> = new Map();
+
+  constructor() {
+    this.forwards.set('BTC', 45000);
+    this.forwards.set('ETH', 3000);
+  }
+
+  updateForward(symbol: string, forward: number): void {
+    this.forwards.set(symbol, forward);
+    // keep vol service in sync
+    volService.updateSpot(symbol, forward);
+    console.log(`Updated ${symbol} forward to ${forward}`);
+  }
+
+  getForward(symbol: string): number {
+    return this.forwards.get(symbol) || 45000;
+  }
+
+  getQuote(req: QuoteRequest): Quote {
+    const forward = this.getForward(req.symbol);
+
+    // NEW: drive the IntegratedSmileModel via volService
+    const q = volService.getQuoteWithIV(
+      req.symbol,
+      req.expiryMs,
+      req.strike,
+      req.optionType,
+      req.marketIV
+    );
+
+    // size clamp (optional)
+    let bidSize = q.bidSize;
+    let askSize = q.askSize;
+    if (req.side === 'SELL' && req.size) bidSize = Math.min(bidSize, req.size);
+    if (req.side === 'BUY'  && req.size) askSize = Math.min(askSize, req.size);
+
+    return {
+      symbol: req.symbol,
+      strike: req.strike,
+      expiryMs: req.expiryMs,
+      optionType: req.optionType,
+      bid: q.bid,
+      ask: q.ask,
+      bidSize,
+      askSize,
+      mid: q.mid,
+      spread: q.spread,
+      edge: q.edge,
+      forward,
+      timestamp: Date.now(),
+      pcMid: q.pcMid,     // 👈
+      ccMid: q.ccMid,     // 👈
+      bucket: q.bucket   // 👈
+    };
+  }
+
+  getQuoteGrid(symbol: string, strikes: number[], expiryMs: number, optionType: 'C'|'P' = 'C'): Quote[] {
+    return strikes.map(strike =>
+      this.getQuote({ symbol, strike, expiryMs, optionType })
+    );
+  }
+
+  executeTrade(trade: Trade): void {
+    const forward = this.getForward(trade.symbol);
+
+    // ✅ route trade into the model (customer side; service handles signing)
+    volService.onCustomerTrade(
+      trade.symbol,
+      trade.strike,
+      trade.side,               // 'BUY' | 'SELL' (customer side)
+      trade.size,
+      trade.price,
+      trade.expiryMs,
+      trade.optionType,
+      trade.timestamp
+    );
+
+    console.log(`Trade executed: Customer ${trade.side} ${trade.size}x ${trade.strike} @ ${trade.price}`);
+
+    const inv = volService.getInventory(trade.symbol);
+    if (inv) {
+      const tv = Number(inv.totalVega ?? inv.total?.vega ?? 0);
+      console.log(`${trade.symbol} inventory: ${inv.totalVega.toFixed(1)} vega`);
+    }
+  }
+
+  getInventory(symbol: string) {
+    return volService.getInventory(symbol);
+  }
+}
+
+export const quoteEngine = new QuoteEngine();
+
+export async function initializeWithMarketData(prisma: PrismaClient) {
+  const btcPerp = await prisma.ticker.findFirst({
+    where: { instrument: "BTC-PERPETUAL" },
+    orderBy: { tsMs: "desc" }
+  });
+
+  const btcForward = btcPerp?.markPrice || btcPerp?.lastPrice || 45000;
+  console.log(`Initializing BTC with forward: ${btcForward}`);
+  quoteEngine.updateForward('BTC', btcForward);
+  return btcForward;
+}
+
+
+----- FILE: apps/server/src/risk.ts -----
+
+import { PrismaClient } from "@prisma/client";
+
+const YEAR_MS = 365.25 * 24 * 3600 * 1000;
+
+// ---- math helpers
+function erf(x:number){
+  const sign = x < 0 ? -1 : 1;
+  const a1=0.254829592, a2=-0.284496736, a3=1.421413741, a4=-1.453152027, a5=1.061405429, p=0.3275911;
+  const t = 1/(1+p*Math.abs(x));
+  const y = 1 - (((((a5*t + a4)*t) + a3)*t + a2)*t + a1)*t*Math.exp(-x*x);
+  return sign*y;
+}
+const N = (x:number)=>0.5*(1+erf(x/Math.SQRT2));
+const n = (x:number)=>Math.exp(-0.5*x*x)/Math.sqrt(2*Math.PI);
+
+// ---- Black-76 greeks (futures options)
+export function black76Greeks(
+  F: number,
+  K: number,
+  T: number,
+  sigma: number,
+  isCall: boolean,
+  df = 1
+) {
+  const sT = Math.max(1e-12, sigma * Math.sqrt(Math.max(T, 1e-12)));
+  const d1 = (Math.log(F / K) + 0.5 * sigma * sigma * T) / sT;
+  const d2 = d1 - sT;
+  const pdf = n(d1);
+
+  // price (Black 76, discounted by df)
+  const callPrice = df * (F * N(d1) - K * N(d2));
+  const putPrice  = df * (K * N(-d2) - F * N(-d1));
+  const price = isCall ? callPrice : putPrice;
+
+  const delta = (isCall ? N(d1) : (N(d1) - 1)) * df;
+  const gamma = (df * pdf) / (F * sT);
+  const vega  = df * F * pdf * Math.sqrt(Math.max(T, 1e-12));
+  const theta = -df * (F * pdf * sigma / (2 * Math.sqrt(T))); // minimal (no carry)
+
+  return { price, delta, gamma, vega, theta, d1, d2 };
+}
+
+
+// ---- helpers to fetch most recent market marks
+export async function getLatestIndex(prisma: PrismaClient, indexName="btc_usd"){
+  const r = await prisma.tickIndex.findFirst({ where:{ indexName }, orderBy:{ tsMs:"desc" }});
+  return r?.price ?? null;
+}
+export async function getLatestTickerIV(prisma: PrismaClient, name: string){
+  const r = await prisma.ticker.findFirst({ where:{ instrument: name, markIv: { not: null } }, orderBy:{ tsMs:"desc" }});
+  return (r?.markIv ?? null);
+}
+export async function getLatestTickerMid(prisma: PrismaClient, name: string){
+  const r = await prisma.ticker.findFirst({ where:{ instrument: name }, orderBy:{ tsMs:"desc" }});
+  if(!r) return null;
+  const mid = (r.bestBid!=null && r.bestAsk!=null) ? (r.bestBid+r.bestAsk)/2 : (r.markPrice ?? null);
+  return mid;
+}
+
+// ---- risk aggregation
+export type LegRisk = {
+  instrument: string;
+  qty: number;
+  F: number | null;
+  iv: number | null;
+  mid: number | null;
+  T: number | null;
+  greeks?: { delta:number; gamma:number; vega:number; theta:number };
+  pv?: number | null;            // position PV using mid
+  unrealized?: number | null;    // (mid - avg)*qty
+};
+export type PortfolioRisk = {
+  legs: LegRisk[];
+  totals: { delta:number; gamma:number; vega:number; theta:number; pv:number; unrealized:number };
+};
+
+export async function computePortfolioRisk(prisma: PrismaClient): Promise<PortfolioRisk> {
+  const positions = await prisma.position.findMany();
+  if (positions.length === 0) {
+    return { legs: [], totals: { delta: 0, gamma: 0, vega: 0, theta: 0, pv: 0, unrealized: 0 } };
+  }
+
+  const denom = (process.env.PNL_DENOM || "BTC").toUpperCase() as "BTC" | "USD";
+  const Findex = await getLatestIndex(prisma, "btc_usd"); // BTCUSD spot
+  const usdMult = denom === "USD" ? (Findex ?? 0) : 1;    // multiply BTC amounts by spot to show USD
+
+  const metaMap = new Map<string, any>();
+  const getMeta = async (name: string): Promise<any> => {
+    if (metaMap.has(name)) return metaMap.get(name)!;
+    const m: any = await prisma.instrument.findUnique({ where: { id: name } });
+    if (m) metaMap.set(name, m);
+    return m!;
+  };
+
+  const legs: LegRisk[] = [];
+  let td = 0, tg = 0, tv = 0, tt = 0, tpv = 0, tunr = 0;
+
+  for (const p of positions) {
+    const meta = await getMeta(p.instrument);
+    if (!meta) continue;
+
+    // Futures leg (no optionType)
+    if (!meta.optionType) {
+      const F = Findex;
+      const mid = F;
+      const pvBTC = (mid != null) ? (mid - p.avgPrice) * p.qty : null;
+      const pv = pvBTC != null ? pvBTC * (denom === "USD" ? 1 : 1) : null; // for futures we already store USD-like price
+      legs.push({
+        instrument: p.instrument, qty: p.qty, F, iv: null, mid, T: null,
+        greeks: { delta: p.qty, gamma: 0, vega: 0, theta: 0 },
+        pv, unrealized: pv
+      });
+      td += p.qty; tpv += pv ?? 0; tunr += pv ?? 0;
+      continue;
+    }
+
+    // Option leg (option prices are in BTC; convert if needed)
+    const F = Findex;
+    const iv = await getLatestTickerIV(prisma, p.instrument);
+    const midBTC = await getLatestTickerMid(prisma, p.instrument); // BTC per option
+    const now = Date.now();
+    const T = (meta.expiryMs ? Number(meta.expiryMs) - now : 0) / YEAR_MS;
+    const isCall = meta.optionType.toLowerCase().startsWith("c");
+
+    let greeks, pv = null, unr = null;
+    if (F != null && iv != null && T > 0) {
+      greeks = black76Greeks(F, meta.strike ?? F, Math.max(T, 1e-6), Math.max(iv, 1e-4), isCall, 1.0);
+      if (midBTC != null) {
+        const pvBTC = (midBTC - p.avgPrice) * p.qty;  // PnL in BTC
+        const pvConv = denom === "USD" ? pvBTC * (Findex ?? 0) : pvBTC;
+        pv = pvConv; unr = pvConv;
+      }
+      td += greeks.delta * p.qty;
+      tg += greeks.gamma * p.qty;
+      tv += greeks.vega * p.qty;
+      tt += greeks.theta * p.qty;
+      tpv += pv ?? 0;
+      tunr += unr ?? 0;
+    }
+
+    // present mid in selected denom too
+    const mid = midBTC != null ? (denom === "USD" ? midBTC * usdMult : midBTC) : null;
+
+    legs.push({ instrument: p.instrument, qty: p.qty, F, iv, mid, T, greeks, pv, unrealized: unr });
+  }
+
+  return { legs, totals: { delta: td, gamma: tg, vega: tv, theta: tt, pv: tpv, unrealized: tunr } };
+}
+
+// ---- realized PnL from fills
+export async function computeRealizedPnL(prisma: PrismaClient){
+  // super-simplified: sum(side) * price * qty with sign
+  const fills = await prisma.fill.findMany();
+  let realized = 0;
+  for(const f of fills){
+    const sgn = f.side === "sell" ? +1 : -1; // selling reduces long inventory -> realize gains
+    realized += sgn * f.price * f.qty;
+    if(f.fee) realized -= Math.abs(f.fee);
+  }
+  return realized;
+}
+
+
+----- FILE: apps/server/src/utils/time.ts -----
+
+export function timeToExpiryYears(expiryMs: number, now: number = Date.now()): number {
+    const msInYear = 365 * 24 * 60 * 60 * 1000;
+    return Math.max((expiryMs - now) / msInYear, 0);
+  }
+
+
+
+----- FILE: apps/server/src/volModels/integratedSmileModel.ts -----
+
+/**
+ * Integrated Dual Surface Model with Market Calibration
+ * Auto-calibrates from actual market IVs instead of hardcoded defaults
+ */
+
+import { 
+    SVIParams, 
+    TraderMetrics, 
+    NodeState, 
+    Surface, 
+    SVI,
+    WidthDelta
+  } from './dualSurfaceModel';
+  import { ModelConfig, getDefaultConfig } from './config/modelConfig';
+  import { SmileInventoryController } from './smileInventoryController';
+  import { RiskScorer } from './dualSurfaceModel';
+  import { blackScholes, DeltaConventions } from './pricing/blackScholes';
+  import { black76Greeks } from "../risk"; // or wherever you placed black76Greeks
+  import { timeToExpiryYears } from "../utils/time"; // helper that returns T in years
+  
+  const tiny = 1e-12;
+  const safe = (x: number, fallback: number) => (Number.isFinite(x) ? x : fallback);
+
+  export interface Quote {
+    bid: number;
+    ask: number;
+    bidSize: number;
+    askSize: number;
+    pcMid: number;
+    ccMid: number;
+    edge: number;
+    bucket: string;
+  }
+  
+  export interface TradeExecution {
+    expiryMs: number;          // absolute expiry timestamp (ms)
+    strike: number;
+    forward: number;           // use the perp/forward, not spot
+    optionType: 'C' | 'P';     // call or put
+    price: number;
+    size: number;              // signed from CUSTOMER perspective; you can keep same convention you used before
+    time: number;              // trade timestamp (ms)
+  }
+  
+  
+  export interface EnhancedSurface {
+    expiry: number;
+    cc: SVIParams;
+    pc: SVIParams;
+    nodes: Map<number, NodeState>;
+  }
+  
+  export interface MarketQuoteForCalibration {
+    strike: number;
+    iv: number;
+    weight?: number;
+  }
+  
+  export class IntegratedSmileModel {
+    private surfaces: Map<number, EnhancedSurface>;
+    private inventoryController: SmileInventoryController;
+    private riskScorer: RiskScorer;
+    private config: ModelConfig;
+    private sviConfig: any;
+    private version: number;
+    private marketIVs: Map<number, number>;
+    
+    constructor(product: 'BTC' | 'ETH' | 'SPX' = 'BTC') {
+      this.config = getDefaultConfig(product);
+      this.sviConfig = this.convertToSVIConfig(this.config);
+      this.surfaces = new Map();
+      this.inventoryController = new SmileInventoryController(this.config);
+      this.riskScorer = new RiskScorer();
+      this.version = 0;
+      this.marketIVs = new Map();
+    }
+    
+    private deriveMetricsFromMarketIV(atmIV: number, expiry: number): TraderMetrics {
+      const L0 = atmIV * atmIV * expiry;
+      
+      return {
+        L0: L0,
+        S0: -0.02,
+        C0: 0.5,
+        S_neg: -0.8,
+        S_pos: 0.9
+      };
+    }
+    
+    private convertToSVIConfig(mc: ModelConfig): any {
+      const edgeParams = new Map();
+      mc.buckets.forEach(bucket => {
+        edgeParams.set(bucket.name, bucket.edgeParams);
+      });
+      
+      return {
+        bMin: mc.svi.bMin,
+        sigmaMin: mc.svi.sigmaMin,
+        rhoMax: mc.svi.rhoMax,
+        sMax: mc.svi.slopeMax,
+        c0Min: mc.svi.c0Min,
+        buckets: mc.buckets.map(b => ({
+          name: b.name,
+          minDelta: b.minDelta,
+          maxDelta: b.maxDelta
+        })),
+        edgeParams,
+        rbfWidth: mc.rbf.width,
+        ridgeLambda: mc.rbf.ridgeLambda,
+        maxL0Move: mc.riskLimits.maxL0Move,
+        maxS0Move: mc.riskLimits.maxS0Move,
+        maxC0Move: mc.riskLimits.maxC0Move
+      };
+    }
+    
+    updateCC(expiry: number, metrics: TraderMetrics): void {
+      const newCC = SVI.fromMetrics(metrics, this.sviConfig);
+      
+      if (!SVI.validate(newCC, this.sviConfig)) {
+        throw new Error('Invalid SVI parameters');
+      }
+      
+      let surface = this.surfaces.get(expiry);
+      
+      if (!surface) {
+        surface = {
+          expiry,
+          cc: newCC,
+          pc: newCC,
+          nodes: new Map()
+        };
+        this.surfaces.set(expiry, surface);
+      } else {
+        surface.cc = newCC;
+        this.updatePC(surface);
+      }
+      
+      this.version++;
+    }
+    
+    private updatePC(surface: EnhancedSurface): void {
+      surface.pc = this.inventoryController.adjustSVIForInventory(surface.cc);
+    }
+    
+    onTrade(trade: TradeExecution): void {
+        // Get/validate surface for this expiry
+        const surface = this.surfaces.get(trade.expiryMs);
+        if (!surface) {
+          console.warn(`No surface for expiryMs=${trade.expiryMs}`);
+          return;
+        }
+      
+        // Convert expiry to years
+        const T = timeToExpiryYears(trade.expiryMs, trade.time ?? Date.now());
+        if (T <= 0) {
+          console.warn(`Expired trade ignored (T<=0):`, trade);
+          return;
+        }
+      
+        const isCall = trade.optionType === 'C';
+        const F = trade.forward;
+        const K = trade.strike;
+      
+        // Update node state (anchor, width reference, position)
+        this.updateNodeState(surface, {
+          strike: K,
+          price: trade.price,
+          size: trade.size,
+          expiryMs: trade.expiryMs,
+          forward: F,
+          optionType: trade.optionType,
+          time: trade.time ?? Date.now(),
+        } as any); // see helper signature note below
+      
+        // Forward moneyness for SVI
+        const k = Math.log(K / F);
+      
+        // Use CC for greeks/bucketing (fair curve)
+        const ccVar = SVI.w(surface.cc, k);
+        const ccIV  = Math.sqrt(ccVar / T);
+      
+        // Black-76 greeks (absolute vol conventions)
+        console.debug("[b76 trade] args", { F, K, T, sigma: ccIV, isCall });
+        const greeks = black76Greeks(F, K, T, ccIV, isCall, /*df*/ 1.0);
+      
+        // Put-delta convention for bucket mapping
+        console.debug("[b76 trade] args", { F, K, T, sigma: ccIV, isCall });
+        const putGreeks = black76Greeks(F, K, T, ccIV, /*isCall*/ false, 1.0);
+        const putDeltaAbs = Math.abs(putGreeks.delta);
+      
+        // If you have a dedicated forward-delta bucketer, use it; otherwise reuse your DeltaConventions
+        const bucket = DeltaConventions.strikeToBucket(
+          /*strike*/ K,
+          /*spotOrF*/ F,
+          /*iv*/ ccIV,
+          /*T*/ T,
+          /*r?*/ 0
+        );
+      
+        // Update inventory with vega (per absolute vol unit)
+        this.inventoryController.updateInventory(
+          K,
+          trade.size,
+          greeks.vega,
+          bucket
+        );
+      
+        // Recompute PC from inventory-aware adjustments
+        this.updatePC(surface);
+      
+        this.version++;
+      }
+      
+    
+      private updateNodeState(
+        surface: EnhancedSurface,
+        trade: {
+          strike: number;
+          price: number;
+          size: number;
+          expiryMs: number;
+          forward: number;
+          optionType: 'C'|'P';
+          time: number;
+        }
+      ): void {
+        let node = surface.nodes.get(trade.strike);
+      
+        // Compute a width ref using a simple gamma proxy (you can refine)
+        const T = timeToExpiryYears(trade.expiryMs, trade.time);
+        const k = Math.log(trade.strike / trade.forward);
+        const ccVar = SVI.w(surface.cc, k);
+        const ccIV  = Math.sqrt(ccVar / Math.max(T, 1e-8));
+        console.debug("[b76 node] args", {
+        F: trade.forward,
+        K: trade.strike,
+        T: Math.max(T, 1e-8),
+        sigma: ccIV,
+        isCall: trade.optionType === 'C'
+        });
+        const greeks = black76Greeks(trade.forward, trade.strike, Math.max(T, 1e-8), ccIV, trade.optionType === 'C', 1.0);
+        const widthRef = this.riskScorer.computeWidth({ gamma: greeks.gamma });
+      
+        // Bucket at trade time (using CC IV)
+        const bucket = DeltaConventions.strikeToBucket(trade.strike, trade.forward, ccIV, Math.max(T, 1e-8));
+      
+        if (!node) {
+          node = {
+            strike: trade.strike,
+            pcAnchor: trade.price,
+            widthRef,
+            position: trade.size,   // sign convention: your engine uses negative for short; adjust if needed
+            lastBucket: bucket,
+            lastTradeTime: trade.time
+          };
+          surface.nodes.set(trade.strike, node);
+        } else {
+          node.pcAnchor = trade.price;
+          node.position += trade.size;
+          node.widthRef = widthRef;
+          node.lastBucket = bucket;
+          node.lastTradeTime = trade.time;
+        }
+      }
+      
+    
+    calibrateFromMarket(
+      expiry: number,
+      marketQuotes: MarketQuoteForCalibration[],
+      spot: number
+    ): void {
+      if (marketQuotes.length === 0) {
+        console.warn('No market quotes provided for calibration');
+        return;
+      }
+      
+      const atmQuote = marketQuotes.reduce((closest, q) => 
+        Math.abs(q.strike - spot) < Math.abs(closest.strike - spot) ? q : closest
+      );
+      
+      console.log(`Calibrating from market: ATM strike=${atmQuote.strike}, IV=${(atmQuote.iv*100).toFixed(1)}%`);
+      
+      this.marketIVs.set(expiry, atmQuote.iv);
+      
+      const metrics = this.deriveMetricsFromMarketIV(atmQuote.iv, expiry);
+      
+      this.updateCC(expiry, metrics);
+    }
+    
+    getQuote(
+        expiryMs: number,
+        strike: number,
+        forward: number,
+        optionType: 'C' | 'P',
+        marketIV?: number
+      ): Quote {
+        // --- safety helpers (scoped to this call) ---
+        const tiny = 1e-12;
+        const safe = (x: number, fallback = 0) => (Number.isFinite(x) ? x : fallback);
+      
+        const isCall = optionType === 'C';
+      
+        // 1) Time to expiry (never let it be <= 0)
+        const Traw = timeToExpiryYears(expiryMs);
+        const T = Math.max(safe(Traw, 0), 1e-8);
+      
+        // 2) Ensure a surface exists (and is in sync with ATM IV if provided)
+        let surface = this.surfaces.get(expiryMs);
+      
+        // ATM IV handling + recalibration decision
+        let atmIV: number;
+        let shouldRecalibrate = false;
+        if (marketIV !== undefined) {
+          atmIV = marketIV;
+          const cached = this.marketIVs.get(expiryMs);
+          if (!cached || Math.abs(atmIV - cached) > 0.01) {
+            this.marketIVs.set(expiryMs, atmIV);
+            shouldRecalibrate = true;
+          }
+        } else if (this.marketIVs.has(expiryMs)) {
+          atmIV = this.marketIVs.get(expiryMs)!;
+        } else {
+          atmIV = 0.35; // fallback
+        }
+      
+        if (!surface || shouldRecalibrate) {
+          const initialMetrics = this.deriveMetricsFromMarketIV(atmIV, T);
+          this.updateCC(expiryMs, initialMetrics);               // creates/updates surface.cc
+          surface = this.surfaces.get(expiryMs)!;
+          this.updatePC(surface);                                 // build inventory-aware PC from CC
+        }
+      
+        // 3) Log-moneyness wrt forward (guard against weird inputs)
+        let k = safe(Math.log(strike / Math.max(forward, tiny)), 0);
+      
+        // 4) Core curve (CC): variance → IV → Black-76 price
+let ccVar = safe(SVI.w(surface.cc, k), tiny);
+ccVar = Math.max(ccVar, tiny);
+
+let ccIV = safe(Math.sqrt(ccVar / T), 0);
+ccIV = Math.max(ccIV, 1e-8);
+
+console.debug("[b76 cc] args", { F: forward, K: strike, T, sigma: ccIV, isCall });
+const ccG = black76Greeks(forward, strike, T, ccIV, isCall, 1.0);
+const ccMidBase = safe(ccG.price, 0);
+
+// 5) Price curve (PC): variance → IV → Black-76 price
+let pcVar = safe(SVI.w(surface.pc, k), tiny);
+pcVar = Math.max(pcVar, tiny);
+
+let pcIV = safe(Math.sqrt(pcVar / T), 0);
+pcIV = Math.max(pcIV, 1e-8);
+
+console.debug("[b76 pc] args", { F: forward, K: strike, T, sigma: pcIV, isCall });
+const pcG = black76Greeks(forward, strike, T, pcIV, isCall, 1.0);
+const pcMidBase = safe(pcG.price, 0);
+
+// ---- helpers for sanity + proxy (define ONCE)
+const midIsSane = (p: number) =>
+  Number.isFinite(p) && p >= 0 && p <= Math.max(forward, strike) * 2;
+
+const proxyMid = (iv: number) => forward * iv * Math.sqrt(T) * 0.4; // simple convexity proxy
+
+// ---- choose override or fallback, then sanity-clamp
+const ccMidCandidate = proxyMid ? proxyMid(ccIV) : ccMidBase;
+const pcMidCandidate = proxyMid ? proxyMid(pcIV) : pcMidBase;
+
+const ccMid = midIsSane(ccMidCandidate) ? ccMidCandidate : proxyMid(ccIV);
+const pcMid = midIsSane(pcMidCandidate) ? pcMidCandidate : proxyMid(pcIV);
+      
+        // 6) Bucket (put-delta convention) for inventory/sizing
+        const bucket = DeltaConventions.strikeToBucket(strike, forward, ccIV, T);
+      
+        // 7) Ensure a node exists & persist it (anchor/widthRef/position)
+        let node = surface.nodes.get(strike);
+        if (!node) {
+          node = {
+            strike,
+            pcAnchor: pcMid,
+            widthRef: this.riskScorer.computeWidth({ gamma: ccG.gamma }),
+            position: 0,
+            lastBucket: bucket,
+            lastTradeTime: Date.now(),
+          };
+          surface.nodes.set(strike, node);
+        }
+      
+        // 8) Compute current width (half-spread) from risk scorer
+        const currentWidth = this.riskScorer.computeWidth({
+          gamma: pcG.gamma,
+          J_L0: 1.0,
+          J_S0: 0.5,
+          J_C0: 0.3,
+        });
+      
+        // 9) Cash quotes (clamp bid ≥ 0)
+        const bid = Math.max(0, pcMid - currentWidth);
+        const ask = pcMid + currentWidth;
+        const edge = pcMid - ccMid;
+      
+        // 10) Size logic (inventory-aware)
+        const baseSize = this.config.quotes.sizeBlocks;
+        const invState = this.inventoryController.getInventoryState();
+        const bucketInv = invState.get(bucket as any); // depending on your Inventory type signature
+      
+        let bidSize = baseSize;
+        let askSize = baseSize;
+      
+        if (bucketInv && typeof (bucketInv as any).vega === 'number') {
+          const vegaSigned = (bucketInv as any).vega as number;
+          const vref =
+            this.config.buckets.find((b) => b.name === bucket)?.edgeParams.Vref ?? 100;
+          const invRatio = Math.min(5, Math.abs(vegaSigned) / Math.max(vref, 1e-6));
+      
+          // If we are short vega in this bucket, reduce ask size (discourage more selling)
+          if (vegaSigned < 0) {
+            askSize = Math.max(10, Math.round(baseSize * Math.exp(-invRatio)));
+          } else if (vegaSigned > 0) {
+            bidSize = Math.max(10, Math.round(baseSize * Math.exp(-invRatio)));
+          }
+        }
+      
+        return {
+          bid,
+          ask,
+          bidSize,
+          askSize,
+          pcMid,
+          ccMid,
+          edge,
+          bucket,
+        };
+      }
+    
+    getInventorySummary() {
+      const invState = this.inventoryController.getInventoryState();
+      const adjustments = this.inventoryController.calculateSmileAdjustments();
+      
+      const summary = {
+        totalVega: 0,
+        byBucket: {} as any,
+        smileAdjustments: adjustments
+      };
+      
+      for (const [bucket, inv] of invState) {
+        summary.totalVega += inv.vega;
+        summary.byBucket[bucket] = {
+          vega: inv.vega,
+          count: inv.count
+        };
+      }
+      
+      return summary;
+    }
+    
+    updateMarketObservations(observations: any[]): void {
+      this.riskScorer.updateFromMarket(observations);
+    }
+    
+    compareSurfaces(expiry: number, spot: number): void {
+      const surface = this.surfaces.get(expiry);
+      if (!surface) return;
+      
+      console.log('\nSurface Comparison (CC vs PC):');
+      console.log('Strike | CC Vol  | PC Vol  | Edge   | Bucket');
+      console.log('-'.repeat(50));
+      
+      const strikes = [
+        spot * 0.80,
+        spot * 0.90,
+        spot * 0.95,
+        spot * 1.00,
+        spot * 1.05,
+        spot * 1.10,
+        spot * 1.20
+      ];
+      
+      for (const strike of strikes) {
+        const k = Math.log(strike / spot);
+        
+        const ccVar = SVI.w(surface.cc, k);
+        const pcVar = SVI.w(surface.pc, k);
+        
+        const ccVol = Math.sqrt(ccVar / expiry) * 100;
+        const pcVol = Math.sqrt(pcVar / expiry) * 100;
+        
+        const ccPrice = blackScholes({
+          strike,
+          spot,
+          vol: ccVol / 100,
+          T: expiry,
+          r: 0,
+          isCall: false
+        }).price;
+        
+        const pcPrice = blackScholes({
+          strike,
+          spot,
+          vol: pcVol / 100,
+          T: expiry,
+          r: 0,
+          isCall: false
+        }).price;
+        
+        const edge = pcPrice - ccPrice;
+        const bucket = DeltaConventions.strikeToBucket(strike, spot, ccVol / 100, expiry);
+        
+        console.log(
+          `${strike.toFixed(0).padStart(6)} | ` +
+          `${ccVol.toFixed(2).padStart(7)}% | ` +
+          `${pcVol.toFixed(2).padStart(7)}% | ` +
+          `${edge.toFixed(2).padStart(6)} | ` +
+          `${bucket}`
+        );
+      }
+    }
+    getCCSVI(expiryMs: number): SVIParams | null {
+        const s = this.surfaces.get(expiryMs);
+        return s ? s.cc : null;
+      }
+
+  }
+
+----- FILE: apps/server/src/volModels/integration/volModelService.ts -----
+
+// apps/server/src/volModels/integration/volModelService.ts
+
+import { IntegratedSmileModel } from "../integratedSmileModel";
+import { FactorVec, ZeroFactors, axpy, dot } from "../factors/FactorSpace";
+import { factorGreeksFiniteDiff } from "../factors/factorGreeks";
+import { timeToExpiryYears } from "../../utils/time";
+
+
+// ---- Types exposed by the service
+export type Side = "BUY" | "SELL";
+export type OptionType = "C" | "P";
+
+export interface QuoteOut {
+  bid: number;
+  ask: number;
+  bidSize: number;
+  askSize: number;
+  mid: number;
+  spread: number;
+  edge: number;
+  ccMid?: number;   // if you want to expose later
+  pcMid?: number;   // if you want to expose later
+  bucket?: string;
+}
+
+// ---- Internal per-symbol state
+type SymbolState = {
+  model: IntegratedSmileModel;
+  forward: number;  
+  factors: {
+    lambda: FactorVec;
+    inventory: FactorVec;
+  };            // current forward (perp)
+};
+
+const YEAR_MS = 365.25 * 24 * 60 * 60 * 1000;
+
+// Conservative default forward if none set yet
+const DEFAULT_FORWARDS: Record<string, number> = {
+  BTC: 45000,
+  ETH: 3000,
+};
+
+function nowMs(): number {
+  return Date.now();
+}
+
+function ensureMs(expiryOrYears: number): number {
+  // Back-compat helper:
+  // If input is "small" (e.g. 0.08 years), treat as years-from-now → convert to ms.
+  // If input is a big number (> 10^10), assume it's already a ms timestamp.
+  if (expiryOrYears > 1e10) return Math.floor(expiryOrYears); // ms epoch
+  const Tyears = Math.max(expiryOrYears, 0);
+  return Math.floor(nowMs() + Tyears * YEAR_MS);
+}
+
+class VolModelService {
+  private symbols: Map<string, SymbolState> = new Map();
+
+  // Get or create model for a symbol
+  private getState(symbol: string): SymbolState {
+    let s = this.symbols.get(symbol);
+    if (!s) {
+      s = {
+        model: new IntegratedSmileModel(), // default product config inside
+        forward: DEFAULT_FORWARDS[symbol] ?? DEFAULT_FORWARDS.BTC,
+        factors: {
+            // ticks (or price units) per unit factor exposure — tune later or load from config
+            lambda: [0.50, 0.20, 0.10, 0.15, 0.10, 0.30],
+            inventory: [...ZeroFactors],
+          },
+      };
+      this.symbols.set(symbol, s);
+    }
+    return s;
+  }
+
+  // === Public API ===
+
+  /**
+   * Update the "spot" used by the model, which in our setup is the **forward** (perp).
+   * Keep this in sync with quoteEngine.updateForward(...)
+   */
+  updateSpot(symbol: string, forward: number): void {
+    const s = this.getState(symbol);
+    s.forward = forward;
+  }
+
+  updateForward(symbol: string, forward: number): void {
+    this.updateSpot(symbol, forward);
+  }
+
+  getFactors(symbol: string) {
+    const s = this.getState(symbol);
+    return {
+      lambda: s.factors.lambda,
+      inventory: s.factors.inventory,
+      lambdaDotInventory: dot(s.factors.lambda, s.factors.inventory),
+    };
+  }
+
+  setLambda(symbol: string, lambda: FactorVec) {
+    const s = this.getState(symbol);
+    s.factors.lambda = lambda;
+    return this.getFactors(symbol);
+  }
+
+  clearInventory(symbol: string) {
+    const s = this.getState(symbol);
+    s.factors.inventory = [...ZeroFactors];
+    return this.getFactors(symbol);
+  }
+  /**
+   * Get a quote, with optional ATM market IV to recalibrate.
+   * Back-compat: if expiry is passed in YEARS, we convert to ms from now.
+   */
+  getQuoteWithIV(
+    symbol: string,
+    strike: number,
+    expiryMsOrYears: number,
+    marketIV?: number,
+    optionType: OptionType = "C"
+  ): QuoteOut {
+    const s = this.getState(symbol);
+    const expiryMs = ensureMs(expiryMsOrYears);
+
+    const q = s.model.getQuote(expiryMs, strike, s.forward, optionType, marketIV);
+    const mid = (q.bid + q.ask) / 2;
+
+    return {
+      bid: q.bid,
+      ask: q.ask,
+      bidSize: q.bidSize,
+      askSize: q.askSize,
+      mid,
+      spread: q.ask - q.bid,
+      edge: q.edge,
+      ccMid: q.ccMid,   // available if you want to surface it
+      pcMid: q.pcMid,   // available if you want to surface it
+      bucket: q.bucket, // useful for UI
+    };
+  }
+
+  /**
+   * Record a customer trade into the model.
+   * Preferred signature: include expiryMs and optionType.
+   * Back-compat shim: we accept calls without those, but we log a warning and
+   * apply a 1w default expiry and 'C' option type.
+   */
+  onCustomerTrade(
+    symbol: string,
+    strike: number,
+    side: Side,
+    size: number,
+    price: number,
+    expiryMs?: number,
+    optionType: OptionType = "C",
+    tradeTimeMs?: number,
+    marketIV?: number            // <- optional: ATM IV used at trade time
+  ): true {
+    const s = this.getState(symbol);
+  
+    let exp = expiryMs;
+    if (!exp) {
+      console.warn(`[volService] onCustomerTrade missing expiryMs. Using 7d default (back-compat).`);
+      exp = nowMs() + 7 * 24 * 3600 * 1000;
+    }
+  
+    // ✅ Ensure the surface exists & is calibrated for this expiry before we book the trade
+    //    (this will create/update the surface keyed by exp)
+    s.model.getQuote(exp!, strike, s.forward, optionType, marketIV);
+
+    // Use CUSTOMER-side sign: BUY -> we are short -> negative size
+    const signedSize = side === "BUY" ? -Math.abs(size) : Math.abs(size);
+
+        const cc = s.model.getCCSVI(exp!);
+    if (cc) {
+    const T = Math.max(timeToExpiryYears(exp!, tradeTimeMs ?? nowMs()), 1e-8);
+    const isCall = optionType === "C";
+    const g = factorGreeksFiniteDiff(cc, strike, T, s.forward, isCall);
+    // signedSize already uses our sign convention (BUY => we are short => negative)
+    s.factors.inventory = axpy(s.factors.inventory as any, signedSize, g);
+    // Optional: log for visibility
+    const ladg = dot(s.factors.lambda, g);
+    console.log(`[factors] g=${JSON.stringify(g.map(x=>+x.toFixed(6)))} λ·g=${ladg.toFixed(4)} I=${JSON.stringify(s.factors.inventory.map(x=>+x.toFixed(2)))}`);
+    }
+  
+  
+  
+    s.model.onTrade({
+      expiryMs: exp!,
+      strike,
+      forward: s.forward,
+      optionType,
+      price,
+      size: signedSize,                 // keep customer-side convention
+      time: tradeTimeMs ?? nowMs(),
+    });
+  
+    return true;
+  }
+
+  /**
+   * Get inventory summary for a symbol (vega by bucket, smile adjustments, etc.)
+   */
+  getInventory(symbol: string) {
+    const s = this.getState(symbol);
+    return s.model.getInventorySummary();
+  }
+}
+
+// Export singleton
+export const volService = new VolModelService();
+
+
+----- FILE: apps/server/src/volModels/smileInventoryController.ts -----
+
+/**
+ * Smile-based Inventory Controller
+ * Adjusts entire smile shape based on inventory, not local bumps
+ */
+
+import { SVIParams, SVI, TraderMetrics } from './dualSurfaceModel';
+import { ModelConfig } from './config/modelConfig';
+
+export interface SmileAdjustments {
+  deltaL0: number;   // ATM level change
+  deltaS0: number;   // Skew change
+  deltaC0: number;   // Curvature change
+  deltaSNeg: number; // Left wing change
+  deltaSPos: number; // Right wing change
+}
+
+export interface InventoryBucket {
+  vega: number;
+  count: number;
+  strikes: number[];
+  edgeRequired?: number;
+}
+
+export class SmileInventoryController {
+  private inventory: Map<string, InventoryBucket>;
+  private config: ModelConfig;
+  
+  constructor(config: ModelConfig) {
+    this.config = config;
+    this.inventory = new Map();
+  }
+  
+  /**
+   * Update inventory after trade
+   */
+  updateInventory(strike: number, size: number, vega: number, bucket: string): void {
+    let bucketInv = this.inventory.get(bucket);
+    
+    if (!bucketInv) {
+      bucketInv = {
+        vega: 0,
+        count: 0,
+        strikes: [],
+        edgeRequired: 0
+      };
+      this.inventory.set(bucket, bucketInv);
+    }
+    
+    bucketInv.vega += size * vega;
+    bucketInv.count += 1;
+    
+    if (!bucketInv.strikes.includes(strike)) {
+      bucketInv.strikes.push(strike);
+    }
+  }
+  
+  /**
+   * Calculate smile adjustments based on inventory
+   * This is the key function that maps inventory to smile changes
+   */
+  calculateSmileAdjustments(): SmileAdjustments {
+    let deltaL0 = 0;
+    let deltaS0 = 0;
+    let deltaC0 = 0;
+    let deltaSNeg = 0;
+    let deltaSPos = 0;
+    
+    for (const [bucket, inv] of this.inventory) {
+      if (Math.abs(inv.vega) < 0.1) continue;
+      
+      // Get edge requirement for this bucket
+      const bucketConfig = this.config.buckets.find(b => b.name === bucket);
+      if (!bucketConfig) continue;
+      
+      const { E0, kappa, gamma, Vref } = bucketConfig.edgeParams;
+      
+      // Calculate required edge (negative sign for SHORT position wanting higher prices)
+      const normalized = Math.abs(inv.vega) / Vref;
+      const edgeRequired = -Math.sign(inv.vega) * (E0 + kappa * Math.pow(normalized, gamma));
+      
+      // Store for diagnostics
+      inv.edgeRequired = edgeRequired;
+      
+      // Convert edge to smile parameter changes
+      // REDUCED: Was 0.01, now 0.0001 for reasonable adjustments
+      const TICK_TO_VOL = 0.005;  // 0.5% vol per tick — just for debugging visibility
+      
+      switch (bucket) {
+        case 'atm':
+          // ATM inventory mainly affects level and curvature
+          deltaL0 += edgeRequired * TICK_TO_VOL * 1.0;
+          deltaC0 += Math.sign(inv.vega) * Math.abs(edgeRequired) * 0.0001;
+          break;
+          
+        case 'rr25':
+          // 25-delta inventory affects skew and wings
+          if (inv.vega < 0) {
+            // SHORT 25d puts - market maker wants higher prices
+            deltaS0 += Math.abs(edgeRequired) * TICK_TO_VOL * 0.3;  // Increase skew
+            deltaSNeg += -Math.abs(edgeRequired) * TICK_TO_VOL * 0.2; // Lower left wing
+            deltaL0 += Math.abs(edgeRequired) * TICK_TO_VOL * 0.2;   // Small ATM lift
+          } else {
+            // LONG 25d puts - market maker wants lower prices
+            deltaS0 -= Math.abs(edgeRequired) * TICK_TO_VOL * 0.3;
+            deltaSNeg -= -Math.abs(edgeRequired) * TICK_TO_VOL * 0.2;
+            deltaL0 -= Math.abs(edgeRequired) * TICK_TO_VOL * 0.2;
+          }
+          break;
+          
+        case 'rr10':
+          // 10-delta mainly affects wings
+          if (inv.vega < 0) {
+            deltaSNeg += -Math.abs(edgeRequired) * TICK_TO_VOL * 0.3;
+            deltaS0 += Math.abs(edgeRequired) * TICK_TO_VOL * 0.15;
+          } else {
+            deltaSNeg -= -Math.abs(edgeRequired) * TICK_TO_VOL * 0.3;
+            deltaS0 -= Math.abs(edgeRequired) * TICK_TO_VOL * 0.15;
+          }
+          break;
+          
+        case 'wings':
+          // Far wings - mostly affects wing slopes  
+          deltaL0 += edgeRequired * TICK_TO_VOL * 0.1;  // Allow signed adjustment
+          deltaSNeg += -edgeRequired * TICK_TO_VOL * 0.4;
+          deltaS0 += edgeRequired * TICK_TO_VOL * 0.1;
+          break;
+      }
+    }
+    
+    return {
+      deltaL0,
+      deltaS0,
+      deltaC0,
+      deltaSNeg,
+      deltaSPos
+    };
+  }
+  
+  /**
+   * Apply adjustments to create PC from CC
+   */
+  adjustSVIForInventory(ccParams: SVIParams): SVIParams {
+    // Get base metrics
+    const baseMetrics = SVI.toMetrics(ccParams);
+    
+    // Calculate adjustments
+    const adjustments = this.calculateSmileAdjustments();
+    
+    // FIXED: Allow L0 to decrease when long (removed Math.max wrapper)
+    const adjustedMetrics: TraderMetrics = {
+      L0: baseMetrics.L0 + adjustments.deltaL0,  // Can now go down when long!
+      S0: baseMetrics.S0 + adjustments.deltaS0,
+      C0: Math.max(0.1, baseMetrics.C0 + adjustments.deltaC0),
+      S_neg: baseMetrics.S_neg + adjustments.deltaSNeg,
+      S_pos: baseMetrics.S_pos + adjustments.deltaSPos
+    };
+    
+    // Ensure L0 stays positive (but allows decrease)
+    if (adjustedMetrics.L0 <= 0) {
+      adjustedMetrics.L0 = 0.001;  // Minimum positive value
+    }
+    
+    // Convert back to SVI
+    const sviConfig = this.createSVIConfig();
+let adjustedSVI = SVI.fromMetrics(adjustedMetrics, sviConfig);
+
+// ✅ Backoff loop: shrink the adjustment until valid
+if (!SVI.validate(adjustedSVI, sviConfig)) {
+  let scale = 0.5;
+  const base = SVI.toMetrics(ccParams);
+  while (scale > 1e-3) {
+    const m: TraderMetrics = {
+      L0: base.L0 + adjustments.deltaL0 * scale,
+      S0: base.S0 + adjustments.deltaS0 * scale,
+      C0: Math.max(0.1, base.C0 + adjustments.deltaC0 * scale),
+      S_neg: base.S_neg + adjustments.deltaSNeg * scale,
+      S_pos: base.S_pos + adjustments.deltaSPos * scale,
+    };
+    const candidate = SVI.fromMetrics(m, sviConfig);
+    if (SVI.validate(candidate, sviConfig)) { adjustedSVI = candidate; break; }
+    scale *= 0.5;
+  }
+  // If still invalid, keep CC but at least log it
+  if (!SVI.validate(adjustedSVI, sviConfig)) {
+    console.warn('Adjusted SVI still invalid after backoff; using CC (no PC separation).');
+    return ccParams;
+  }
+}
+
+return adjustedSVI;
+  }
+  
+  /**
+   * Create SVI config from model config
+   */
+  createSVIConfig(): any {
+    return {
+      bMin: this.config.svi.bMin,
+      sigmaMin: this.config.svi.sigmaMin,
+      rhoMax: this.config.svi.rhoMax,
+      sMax: this.config.svi.slopeMax,
+      c0Min: this.config.svi.c0Min,
+      buckets: [],
+      edgeParams: new Map(),
+      rbfWidth: 0,
+      ridgeLambda: 0,
+      maxL0Move: 0,
+      maxS0Move: 0,
+      maxC0Move: 0
+    };
+  }
+  
+  /**
+   * Get inventory state
+   */
+  getInventoryState(): Map<string, InventoryBucket> {
+    return new Map(this.inventory);
+  }
+  
+  /**
+   * Get inventory summary
+   */
+  getInventory() {
+    const total = { vega: 0, gamma: 0, theta: 0 };
+    const byBucket: any = {};
+    
+    for (const [bucket, inv] of this.inventory) {
+      total.vega += inv.vega;
+      byBucket[bucket] = {
+        vega: inv.vega,
+        count: inv.count
+      };
+    }
+    
+    return {
+      total,
+      totalVega: total.vega,
+      byBucket,
+      smileAdjustments: this.calculateSmileAdjustments()
+    };
+  }
+  
+  /**
+   * Clear inventory
+   */
+  clearInventory(): void {
+    this.inventory.clear();
+  }
+}
+
+/**
+ * Test the smile inventory controller
+ */
+export function testSmileInventory(): void {
+  console.log('\n' + '='.repeat(60));
+  console.log('SMILE-BASED INVENTORY CONTROLLER TEST');
+  console.log('='.repeat(60) + '\n');
+  
+  const { getDefaultConfig } = require('./config/modelConfig');
+  const config = getDefaultConfig('BTC');
+  
+  const controller = new SmileInventoryController(config);
+  
+  // Simulate selling 100 lots of 25d put
+  console.log('Trade: SELL 100 lots of 25-delta put\n');
+  controller.updateInventory(95, -100, 0.5, 'rr25');
+  
+  // Calculate smile adjustments
+  const adjustments = controller.calculateSmileAdjustments();
+  
+  console.log('Smile adjustments from inventory:');
+  console.log(`  ΔL0 (ATM level):     ${(adjustments.deltaL0 * 100).toFixed(3)}% vol`);
+  console.log(`  ΔS0 (Skew):          ${(adjustments.deltaS0 * 100).toFixed(3)}% vol/unit`);
+  console.log(`  ΔC0 (Curvature):     ${adjustments.deltaC0.toFixed(4)}`);
+  console.log(`  ΔS_neg (Left wing):  ${(adjustments.deltaSNeg * 100).toFixed(3)}% vol/unit`);
+  console.log(`  ΔS_pos (Right wing): ${(adjustments.deltaSPos * 100).toFixed(3)}% vol/unit\n`);
+  
+  // Test with base SVI
+  const baseMetrics: TraderMetrics = {
+    L0: 0.04,
+    S0: -0.001,
+    C0: 0.5,
+    S_neg: -0.8,
+    S_pos: 0.9
+  };
+  
+  const sviConfig = controller.createSVIConfig();
+  const baseCC = SVI.fromMetrics(baseMetrics, sviConfig);
+  const adjustedPC = controller.adjustSVIForInventory(baseCC);
+  
+  // Compare metrics
+  const pcMetrics = SVI.toMetrics(adjustedPC);
+  
+  console.log('Surface comparison:');
+  console.log('Parameter | CC      | PC      | Change');
+  console.log('-'.repeat(45));
+  console.log(`L0        | ${baseMetrics.L0.toFixed(4)} | ${pcMetrics.L0.toFixed(4)} | ${(pcMetrics.L0 - baseMetrics.L0).toFixed(4)}`);
+  console.log(`S0        | ${baseMetrics.S0.toFixed(4)} | ${pcMetrics.S0.toFixed(4)} | ${(pcMetrics.S0 - baseMetrics.S0).toFixed(4)}`);
+  console.log(`C0        | ${baseMetrics.C0.toFixed(4)} | ${pcMetrics.C0.toFixed(4)} | ${(pcMetrics.C0 - baseMetrics.C0).toFixed(4)}`);
+  console.log(`S_neg     | ${baseMetrics.S_neg.toFixed(4)} | ${pcMetrics.S_neg.toFixed(4)} | ${(pcMetrics.S_neg - baseMetrics.S_neg).toFixed(4)}`);
+  console.log(`S_pos     | ${baseMetrics.S_pos.toFixed(4)} | ${pcMetrics.S_pos.toFixed(4)} | ${(pcMetrics.S_pos - baseMetrics.S_pos).toFixed(4)}`);
+  
+  // Show impact on vols
+  console.log('\nImpact on implied vols:');
+  console.log('Strike | CC Vol  | PC Vol  | Change');
+  console.log('-'.repeat(40));
+  
+  const T = 0.25;
+  const spot = 100;
+  const strikes = [80, 90, 95, 100, 105, 110, 120];
+  
+  for (const strike of strikes) {
+    const k = Math.log(strike / spot);
+    const ccVar = SVI.w(baseCC, k);
+    const pcVar = SVI.w(adjustedPC, k);
+    const ccVol = Math.sqrt(ccVar / T) * 100;
+    const pcVol = Math.sqrt(pcVar / T) * 100;
+    const change = pcVol - ccVol;
+    
+    console.log(
+      `${strike.toString().padStart(6)} | ` +
+      `${ccVol.toFixed(2).padStart(7)}% | ` +
+      `${pcVol.toFixed(2).padStart(7)}% | ` +
+      `${change >= 0 ? '+' : ''}${change.toFixed(2).padStart(6)}%`
+    );
+  }
+  
+  console.log('\n' + '='.repeat(60));
+}
+
+// Run test if this is the main module
+if (require.main === module) {
+  testSmileInventory();
+}
+
+----- FILE: apps/server/src/volModels/pricing/blackScholes.ts -----
+
+/**
+ * Black-Scholes Pricing Engine
+ * Handles option pricing and Greeks calculation
+ * Conventions:
+ *  - Vega: per absolute vol unit (1.0 = 100% vol)
+ *  - Theta: per year (no /365 here; divide at display time if needed)
+ *  - Rho: per 1% rate move (kept for compatibility)
+ */
+
+function normCdf(x: number): number {
+    const a1 = 0.254829592;
+    const a2 = -0.284496736;
+    const a3 = 1.421413741;
+    const a4 = -1.453152027;
+    const a5 = 1.061405429;
+    const p = 0.3275911;
+  
+    const sign = x >= 0 ? 1 : -1;
+    const absX = Math.abs(x) / Math.sqrt(2);
+    const t = 1 / (1 + p * absX);
+    const y = 1 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-absX * absX);
+    return 0.5 * (1 + sign * y);
+  }
+  
+  function normPdf(x: number): number {
+    return Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
+  }
+  
+  export interface OptionInputs {
+    strike: number;
+    spot: number;
+    vol: number;   // annualized volatility (decimal)
+    T: number;     // time to expiry in years
+    r: number;     // risk-free rate (decimal)
+    isCall: boolean;
+  }
+  
+  export interface OptionGreeks {
+    price: number;
+    delta: number;
+    gamma: number;
+    vega: number;   // per absolute vol
+    theta: number;  // per year
+    rho: number;    // per 1% rate move
+  }
+  
+  export function blackScholes(inputs: OptionInputs): OptionGreeks {
+    const { strike, spot, vol, T, r, isCall } = inputs;
+  
+    if (T <= 0) {
+      const intrinsic = isCall ? Math.max(spot - strike, 0) : Math.max(strike - spot, 0);
+      return { price: intrinsic, delta: intrinsic > 0 ? (isCall ? 1 : -1) : 0, gamma: 0, vega: 0, theta: 0, rho: 0 };
+    }
+  
+    const sqrtT = Math.sqrt(T);
+    const d1 = (Math.log(spot / strike) + (r + 0.5 * vol * vol) * T) / (vol * sqrtT);
+    const d2 = d1 - vol * sqrtT;
+  
+    const Nd1 = normCdf(d1);
+    const Nd2 = normCdf(d2);
+    const Nmd1 = normCdf(-d1);
+    const Nmd2 = normCdf(-d2);
+  
+    const df = Math.exp(-r * T);
+  
+    let price: number;
+    let delta: number;
+  
+    if (isCall) {
+      price = spot * Nd1 - strike * df * Nd2;
+      delta = Nd1;
+    } else {
+      price = strike * df * Nmd2 - spot * Nmd1;
+      delta = -Nmd1;
+    }
+  
+    const nd1 = normPdf(d1);
+    const gamma = nd1 / (spot * vol * sqrtT);
+  
+    // ✅ Vega per absolute vol unit
+    const vega = spot * nd1 * sqrtT;
+  
+    // ✅ Theta per YEAR (no /365)
+    let theta: number;
+    if (isCall) {
+      theta = -spot * nd1 * vol / (2 * sqrtT) - r * strike * df * Nd2;
+    } else {
+      theta = -spot * nd1 * vol / (2 * sqrtT) + r * strike * df * Nmd2;
+    }
+  
+    // Rho per 1% rate move (kept)
+    const rho = isCall ? (strike * T * df * Nd2) / 100 : (-strike * T * df * Nmd2) / 100;
+  
+    return { price, delta, gamma, vega, theta, rho };
+  }
+  
+  /**
+   * Newton solver for BS implied vol
+   * Assumes vega is per absolute vol (no 100x scaling).
+   */
+  export function impliedVol(
+    price: number,
+    strike: number,
+    spot: number,
+    T: number,
+    r: number,
+    isCall: boolean,
+    maxIterations: number = 50,
+    tolerance: number = 1e-6
+  ): number | null {
+    let vol = Math.sqrt(2 * Math.PI / Math.max(T, 1e-12)) * Math.max(price, 1e-12) / Math.max(spot, 1e-12);
+    vol = Math.max(0.001, Math.min(5.0, vol));
+  
+    for (let i = 0; i < maxIterations; i++) {
+      const res = blackScholes({ strike, spot, vol, T, r, isCall });
+      const diff = res.price - price;
+      if (Math.abs(diff) < tolerance) return vol;
+  
+      const vega = res.vega; // ✅ already per absolute vol
+      if (Math.abs(vega) < 1e-10) return null;
+  
+      vol = Math.max(0.001, Math.min(5.0, vol - diff / vega));
+    }
+    return null;
+  }
+  
+  export class PriceVolConverter {
+    static varianceToIV(variance: number, T: number): number {
+      if (T <= 0) return 0;
+      return Math.sqrt(variance / T);
+    }
+    static ivToVariance(iv: number, T: number): number {
+      return iv * iv * T;
+    }
+    static priceFromVariance(
+      variance: number,
+      strike: number,
+      spot: number,
+      T: number,
+      r: number,
+      isCall: boolean
+    ): number {
+      const iv = this.varianceToIV(variance, T);
+      return blackScholes({ strike, spot, vol: iv, T, r, isCall }).price;
+    }
+  }
+  
+  export class DeltaConventions {
+    static spotDelta(inputs: OptionInputs): number {
+      return blackScholes(inputs).delta;
+    }
+    static forwardDelta(inputs: OptionInputs): number {
+      const df = Math.exp(-inputs.r * inputs.T);
+      return this.spotDelta(inputs) / df;
+    }
+    // 🔤 rename: simplicDelta -> simpleDelta
+    static simpleDelta(inputs: OptionInputs): number {
+      return Math.abs(this.spotDelta(inputs));
+    }
+    static strikeToBucket(
+      strike: number,
+      spot: number,
+      vol: number,
+      T: number,
+      r: number = 0
+    ): string {
+      const delta = Math.abs(this.spotDelta({ strike, spot, vol, T, r, isCall: false })); // put-delta convention
+      if (delta >= 0.45 && delta <= 0.55) return 'atm';
+      if (delta >= 0.20 && delta <= 0.30) return 'rr25';
+      if (delta >= 0.08 && delta <= 0.12) return 'rr10';
+      return 'wings';
+    }
+  }
+  
+
+----- FILE: apps/server/src/volModels/tests/bs.test.ts -----
+
+import { black76Greeks } from "../../risk";
+
+describe("black76Greeks", () => {
+  const F = 100_000;
+  const T = 0.25; // 3 months
+  const df = 1;
+
+  test("finite outputs for reasonable inputs (call)", () => {
+    const g = black76Greeks(F, F, T, 0.3, true, df);
+    for (const [k, v] of Object.entries(g)) {
+      expect(Number.isFinite(v as number)).toBe(true);
+    }
+  });
+
+  test("finite outputs for reasonable inputs (put)", () => {
+    const g = black76Greeks(F, F, T, 0.3, false, df);
+    for (const [k, v] of Object.entries(g)) {
+      expect(Number.isFinite(v as number)).toBe(true);
+    }
+  });
+
+  test("call price increases with vol", () => {
+    const p1 = black76Greeks(F, F, T, 0.1, true, df).price;
+    const p2 = black76Greeks(F, F, T, 0.4, true, df).price;
+    expect(p2).toBeGreaterThan(p1);
+  });
+
+  test("put price increases with vol", () => {
+    const p1 = black76Greeks(F, F, T, 0.1, false, df).price;
+    const p2 = black76Greeks(F, F, T, 0.4, false, df).price;
+    expect(p2).toBeGreaterThan(p1);
+  });
+
+  test("deep OTM call ~ small", () => {
+    const p = black76Greeks(F, F * 10, T, 0.3, true, df).price;
+    expect(p).toBeGreaterThanOrEqual(0);
+    expect(p).toBeLessThan(1e-3 * F); // tiny vs forward
+  });
+});
+
+
+----- FILE: apps/server/src/volModels/tests/integratedSmileModel.test.ts -----
+
+import { IntegratedSmileModel } from "../integratedSmileModel";
+
+const days = (d: number) => d * 24 * 3600 * 1000;
+
+describe("IntegratedSmileModel", () => {
+  let model: IntegratedSmileModel;
+  let now: number;
+
+  beforeEach(() => {
+    model = new IntegratedSmileModel("BTC");
+    now = Date.now();
+  });
+
+  test("ATM quote finite & reasonable", () => {
+    const forward = 100_000;
+    const strike  = 100_000;
+    const expiry  = now + days(14);
+
+    const q = model.getQuote(expiry, strike, forward, "C", 0.31);
+    expect(q.pcMid).toBeGreaterThan(0);
+    expect(q.ccMid).toBeGreaterThan(0);
+    expect(q.ask).toBeGreaterThanOrEqual(q.bid);
+    expect(["atm","rr25","rr10","wings"]).toContain(q.bucket);
+  });
+
+  test("trade updates inventory and changes edge (directional)", () => {
+    const forward = 100_000;
+    const strike  = 90_000;       // OTM put-ish
+    const expiry  = now + days(14);
+
+    const q0   = model.getQuote(expiry, strike, forward, "P", 0.31);
+    const edge0 = q0.edge;
+
+    // Customer BUY 50 puts at ask → we SELL → short vega → PC should lift vs CC (edge up)
+    const price = q0.ask;
+    model.onTrade({
+      expiryMs: expiry,
+      strike,
+      forward,
+      optionType: "P",
+      price,
+      size: +50,    // size signed from CUSTOMER perspective per your service
+      time: now
+    });
+
+    const q1 = model.getQuote(expiry, strike, forward, "P", 0.31);
+    expect(Number.isFinite(q1.edge)).toBe(true);
+    expect(q1.edge).not.toBe(edge0);
+  });
+});
+
+
+----- FILE: apps/server/src/volModels/tests/volModelService.test.ts -----
+
+import { volService } from "../integration/volModelService";
+
+describe("volModelService.getQuoteWithIV", () => {
+  test("returns finite quote for normal inputs", () => {
+    const now = Date.now();
+    const res = volService.getQuoteWithIV("BTC", 100_000, now + 14*24*3600*1000, 0.31, "C");
+    expect(Number.isFinite(res.mid)).toBe(true);
+    expect(res.spread).toBeGreaterThanOrEqual(0);
+    expect(res.bid).toBeGreaterThanOrEqual(0);
+    expect(res.ask).toBeGreaterThanOrEqual(res.bid);
+  });
+
+  test("gracefully handles swapped strike/expiry (bogus order)", () => {
+    const now = Date.now();
+    const expiryMs = now + 7*24*3600*1000;
+    const bogusStrike = expiryMs;  // looks like ms timestamp
+    const res = volService.getQuoteWithIV("BTC", bogusStrike, 100_000, 0.31, "P");
+    expect(Number.isFinite(res.mid)).toBe(true);
+    expect(res.spread).toBeGreaterThanOrEqual(0);
+  });
+});
+
+
+----- FILE: apps/server/package.json -----
+
+{
+  "name": "@omm/server",
+  "private": true,
+  "version": "1.0.0",
+  "type": "commonjs",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "ts-node --transpile-only src/index.ts",
+    "test": "jest --runInBand",
+    "test:watch": "jest --watch"
+  },
+  "dependencies": {
+    "@fastify/cors": "^9.0.1",
+    "@prisma/client": "^6.0.0",
+    "dotenv": "^16.4.5",
+    "fastify": "^4.27.2",
+    "ws": "^8.17.1"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.14",
+    "chalk": "^4.1.2",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.2.5",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.0"
+  },
+  "overrides": {
+    "chalk": "4.1.2"
+  }
+}
+
+
+----- FILE: apps/server/tsconfig.json -----
+
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "esModuleInterop": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "outDir": "dist"
+  },
+  "include": ["src"]
+}
+
+
+----- FILE: package.json -----
+
+{
+  "name": "omm-pricer",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "workspaces": ["apps/*"],
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "lint": "eslint .",
+    "preview": "vite preview",
+    "test": "npm run test -ws",
+    "test:server": "npm --workspace @omm/server run test",
+    "dev:server": "npm --workspace @omm/server run dev",
+    "context": "scripts/context.sh",
+    "context:lite": "scripts/context.sh context-pack-lite.txt lite",
+    "context:split": "scripts/context.sh context-pack.txt split",
+    "backtest": "bash apps/server/run-backtest.sh"
+  },
+  "dependencies": {
+    "@tailwindcss/postcss": "^4.1.13",
+    "clsx": "^2.1.1",
+    "framer-motion": "^12.23.22",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "recharts": "^3.2.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.33.0",
+    "@types/jest": "^30.0.0",
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.7",
+    "@vitejs/plugin-react": "^5.0.0",
+    "autoprefixer": "^10.4.21",
+    "eslint": "^9.33.0",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "eslint-plugin-react-refresh": "^0.4.20",
+    "globals": "^16.3.0",
+    "jest": "^30.2.0",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^4.1.13",
+    "ts-jest": "^29.4.4",
+    "vite": "^7.1.2"
+  }
+}
+
+
+----- FILE: apps/server/src/volModels/factors/FactorSpace.ts (PROPOSED) -----
+
+/**
+ * FactorSpace — types + helpers for factor calculus
+ * Factors: [L0, S0, C0, S_neg, S_pos, F]
+ */
+export type FactorVec = [number, number, number, number, number, number];
+export const ZeroFactors: FactorVec = [0,0,0,0,0,0];
+
+export function dot(a: FactorVec, b: FactorVec): number {
+  let s = 0;
+  for (let i=0;i<6;i++) s += a[i]*b[i];
+  return s;
+}
+export function axpy(y: FactorVec, a: number, x: FactorVec): FactorVec {
+  return [
+    y[0] + a*x[0],
+    y[1] + a*x[1],
+    y[2] + a*x[2],
+    y[3] + a*x[3],
+    y[4] + a*x[4],
+    y[5] + a*x[5],
+  ];
+}
+export function norm1(a: FactorVec): number {
+  return Math.abs(a[0])+Math.abs(a[1])+Math.abs(a[2])+Math.abs(a[3])+Math.abs(a[4])+Math.abs(a[5]);
+}
+
+
+----- FILE: apps/server/src/volModels/factors/factorGreeks.ts (PROPOSED) -----
+
+/**
+ * Finite-difference factor greeks g_i = ∂P/∂θ_i
+ * Safe, slow prototype; replace with closed-form SVI partials later.
+ */
+import { FactorVec } from "./FactorSpace";
+import { SVI, SVIParams } from "../dualSurfaceModel";
+import { black76Greeks } from "../../risk";
+
+type PriceFn = (params: {cc: SVIParams; strike:number; T:number; F:number; isCall:boolean}) => number;
+
+const EPS: FactorVec = [1e-4, 1e-4, 1e-3, 1e-4, 1e-4, 1e-6];
+
+export function factorGreeksFiniteDiff(
+  cc: SVIParams,
+  strike: number,
+  T: number,
+  F: number,
+  isCall: boolean,
+  priceFromSVI: PriceFn
+): FactorVec {
+  // Base price from CC
+  const base = priceFromSVI({ cc, strike, T, F, isCall });
+
+  // Map factor → small transform in metric space
+  const m0 = SVI.toMetrics(cc);
+
+  function bump(i: number): number {
+    const m = { ...m0 };
+    switch (i) {
+      case 0: m.L0   += EPS[0]; break;
+      case 1: m.S0   += EPS[1]; break;
+      case 2: m.C0   += EPS[2]; break;
+      case 3: m.S_neg+= EPS[3]; break;
+      case 4: m.S_pos+= EPS[4]; break;
+      case 5: /*F*/   return priceFromSVI({ cc, strike, T, F: F+EPS[5], isCall }) - base;
+    }
+    const bumped = SVI.fromMetrics(m, {
+      bMin: 0, sigmaMin: 1e-6, rhoMax: 0.999, sMax: 5, c0Min: 0.01,
+      buckets: [], edgeParams: new Map(), rbfWidth: 0, ridgeLambda: 0, maxL0Move: 0, maxS0Move: 0, maxC0Move: 0
+    });
+    return priceFromSVI({ cc: bumped, strike, T, F, isCall }) - base;
+  }
+
+  const g0 = bump(0)/EPS[0];
+  const g1 = bump(1)/EPS[1];
+  const g2 = bump(2)/EPS[2];
+  const g3 = bump(3)/EPS[3];
+  const g4 = bump(4)/EPS[4];
+  const g5 = bump(5)/EPS[5];
+
+  return [g0,g1,g2,g3,g4,g5];
+}
+
+
+----- FILE: apps/server/config/risk.factors.yaml (PROPOSED) -----
+
+BTC:
+  lambda:        # ticks (or price units) per unit factor exposure
+    L0:   0.50
+    S0:   0.20
+    C0:   0.10
+    Sneg: 0.15
+    Spos: 0.10
+    F:    0.30
+  widths:
+    w0:    2.0
+    alpha: 1.0
+    beta:  0.0
+  limits:
+    soft:
+      L0:   5000
+      S0:   3000
+      C0:   2000
+      Sneg: 3000
+      Spos: 3000
+      F:    10000
+    hard:
+      L0:   10000
+      S0:   6000
+      C0:   4000
+      Sneg: 6000
+      Spos: 6000
+      F:    20000
+
+
+----- FILE: apps/server/src/volModels/factors/README.md (PROPOSED) -----
+
+# Factor calculus quick notes
+
+- Factors θ = [L0, S0, C0, S_neg, S_pos, F]
+- g_i(K,T,F) = ∂P/∂θ_i via finite-diff (for now)
+- PC mid = CC mid + λ·g
+- width  = w0 + α·|λ·g| + β·invPressure(I)
+- On trade of size q (customer sign):
+  - inventory I ← I + q * g
+  - PC moves instantly by λ·(Δg) if F/T move; otherwise same timestamp: g unchanged, mid unchanged (only inventory and λ·g matter for next quotes)
+
+Swap the finite-diff with closed forms when ready (less noise, faster).
+
+
+----- FILE: API-SKETCH.md (PROPOSED) -----
+
+# Minimal API sketch
+
+GET  /risk/factors
+  -> { symbol, lambda, inventory, lambdaDotInventory, limits }
+
+POST /surface/nudge
+  { symbol, dTheta: { L0?:number, S0?:number, C0?:number, Sneg?:number, Spos?:number, F?:number } }
+  -> applies Δθ_trader with smoothness penalty, returns new snapshot ({pc-cc} across grid)
+
+POST /forward/update
+  { symbol, forward }  -> already exists, ensure it triggers PC recompute
+
+POST /trade/execute
+  -> unchanged; path updates inventory I using factor greeks
+

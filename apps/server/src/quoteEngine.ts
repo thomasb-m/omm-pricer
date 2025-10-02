@@ -1,14 +1,14 @@
 // apps/server/src/quoteEngine.ts
 import { PrismaClient } from "@prisma/client";
-import { volService } from './volModels/integration/volModelService';
+import { volService } from "./volModels/integration/volModelService";
 
 export interface QuoteRequest {
   symbol: string;
   strike: number;
   expiryMs: number;                 // absolute ms
-  optionType: 'C' | 'P';
+  optionType: "C" | "P";
   size?: number;
-  side?: 'BUY' | 'SELL';
+  side?: "BUY" | "SELL";
   marketIV?: number;                // ATM IV (decimal) to calibrate
 }
 
@@ -16,7 +16,7 @@ export interface Quote {
   symbol: string;
   strike: number;
   expiryMs: number;
-  optionType: 'C'|'P';
+  optionType: "C" | "P";
   bid: number;
   ask: number;
   bidSize: number;
@@ -26,17 +26,17 @@ export interface Quote {
   edge: number;
   forward: number;
   timestamp: number;
-  pcMid?: number;
-  ccMid?: number;
-  bucket?: string;
+  pcMid?: number;                   // pricing curve mid (λ·g applied)
+  ccMid?: number;                   // core curve mid (fair)
+  bucket?: string;                  // quote bucket (atm/wings/etc)
 }
 
 export interface Trade {
   symbol: string;
   strike: number;
   expiryMs: number;
-  optionType: 'C'|'P';
-  side: 'BUY' | 'SELL';             // CUSTOMER side
+  optionType: "C" | "P";
+  side: "BUY" | "SELL";             // CUSTOMER side
   size: number;
   price: number;
   timestamp: number;
@@ -46,8 +46,9 @@ export class QuoteEngine {
   private forwards: Map<string, number> = new Map();
 
   constructor() {
-    this.forwards.set('BTC', 45000);
-    this.forwards.set('ETH', 3000);
+    // sensible defaults; will be overwritten at init
+    this.forwards.set("BTC", 45000);
+    this.forwards.set("ETH", 3000);
   }
 
   updateForward(symbol: string, forward: number): void {
@@ -58,13 +59,15 @@ export class QuoteEngine {
   }
 
   getForward(symbol: string): number {
-    return this.forwards.get(symbol) || 45000;
+    return this.forwards.get(symbol) ?? 45000;
   }
 
   getQuote(req: QuoteRequest): Quote {
     const forward = this.getForward(req.symbol);
 
-    // NEW: drive the IntegratedSmileModel via volService
+    // Delegate to volService — this is where the single-calculus runs.
+    // Ensure volService.getQuoteWithIV applies computePcQuote internally
+    // and returns pcMid/ccMid/bucket in addition to the usual fields.
     const q = volService.getQuoteWithIV(
       req.symbol,
       req.expiryMs,
@@ -73,11 +76,19 @@ export class QuoteEngine {
       req.marketIV
     );
 
-    // size clamp (optional)
+    // Optional size clamp by requested side/size
     let bidSize = q.bidSize;
     let askSize = q.askSize;
-    if (req.side === 'SELL' && req.size) bidSize = Math.min(bidSize, req.size);
-    if (req.side === 'BUY'  && req.size) askSize = Math.min(askSize, req.size);
+    if (req.side === "SELL" && req.size) bidSize = Math.min(bidSize, req.size);
+    if (req.side === "BUY"  && req.size) askSize = Math.min(askSize, req.size);
+
+    // Optional lightweight debug: comment out in prod
+    // if (q.pcMid !== undefined && q.ccMid !== undefined) {
+    //   console.log(
+    //     `[${req.symbol}] ${req.optionType} ${req.strike} ${new Date(req.expiryMs).toISOString()} ` +
+    //     `ccMid=${q.ccMid.toFixed(4)} pcMid=${q.pcMid.toFixed(4)} bid=${q.bid.toFixed(4)} ask=${q.ask.toFixed(4)}`
+    //   );
+    // }
 
     return {
       symbol: req.symbol,
@@ -93,26 +104,29 @@ export class QuoteEngine {
       edge: q.edge,
       forward,
       timestamp: Date.now(),
-      pcMid: q.pcMid,     // 👈
-      ccMid: q.ccMid,     // 👈
-      bucket: q.bucket   // 👈
+      pcMid: q.pcMid,   // passthrough from volService (pricing curve mid)
+      ccMid: q.ccMid,   // passthrough from volService (core curve mid)
+      bucket: q.bucket  // passthrough from volService
     };
   }
 
-  getQuoteGrid(symbol: string, strikes: number[], expiryMs: number, optionType: 'C'|'P' = 'C'): Quote[] {
-    return strikes.map(strike =>
+  getQuoteGrid(
+    symbol: string,
+    strikes: number[],
+    expiryMs: number,
+    optionType: "C" | "P" = "C"
+  ): Quote[] {
+    return strikes.map((strike) =>
       this.getQuote({ symbol, strike, expiryMs, optionType })
     );
   }
 
   executeTrade(trade: Trade): void {
-    const forward = this.getForward(trade.symbol);
-
-    // ✅ route trade into the model (customer side; service handles signing)
+    // Route trade into the model (customer side; service handles signs/inventory)
     volService.onCustomerTrade(
       trade.symbol,
       trade.strike,
-      trade.side,               // 'BUY' | 'SELL' (customer side)
+      trade.side,                // "BUY" | "SELL" (customer side)
       trade.size,
       trade.price,
       trade.expiryMs,
@@ -120,11 +134,14 @@ export class QuoteEngine {
       trade.timestamp
     );
 
-    console.log(`Trade executed: Customer ${trade.side} ${trade.size}x ${trade.strike} @ ${trade.price}`);
+    console.log(
+      `Trade executed: Customer ${trade.side} ${trade.size}x ${trade.symbol} ` +
+      `${trade.optionType} ${trade.strike} @ ${trade.price}`
+    );
 
+    // Optional: quick inventory diagnostics
     const inv = volService.getInventory(trade.symbol);
-    if (inv) {
-      const tv = Number(inv.totalVega ?? inv.total?.vega ?? 0);
+    if (inv && typeof inv.totalVega === "number") {
       console.log(`${trade.symbol} inventory: ${inv.totalVega.toFixed(1)} vega`);
     }
   }
@@ -142,8 +159,10 @@ export async function initializeWithMarketData(prisma: PrismaClient) {
     orderBy: { tsMs: "desc" }
   });
 
-  const btcForward = btcPerp?.markPrice || btcPerp?.lastPrice || 45000;
+  const btcForward =
+    btcPerp?.markPrice ?? btcPerp?.lastPrice ?? 45000;
+
   console.log(`Initializing BTC with forward: ${btcForward}`);
-  quoteEngine.updateForward('BTC', btcForward);
+  quoteEngine.updateForward("BTC", btcForward);
   return btcForward;
 }

@@ -1,207 +1,173 @@
-// apps/server/src/replay/backtester.ts
-
-import { ReplayEngine, ReplayStats } from "./replayEngine";
-import { MarketRecorder, MarketSnapshot } from "./marketRecorder";
 import { PrismaClient } from "@prisma/client";
+import { quoteEngine } from "../quoteEngine";
 
-export interface TradeSignal {
+export type Side = "BUY" | "SELL";
+export type OptionType = "C" | "P";
+
+export type BacktestResult = {
+  trades: number;
+  totalEdgeUSD: number;
+  avgEdgePerContractUSD: number;
+  winRatePct: number;
+  byTrade: Trade[];
+  inventory: Record<number, { qty: number; avgPrice: number; totalEdge: number }>;
+};
+
+export type Trade = {
+  ts: number;
   strike: number;
-  expiry: string;
-  side: "BUY" | "SELL";
-  size: number;
-}
+  expiryMs: number;
+  side: Side;
+  optionType: OptionType;
+  price: number;
+  ccMid: number;
+  edgeUSD: number;
+  bucket?: string;
+};
 
-export interface BacktestStrategy {
+export interface Strategy {
   name: string;
-  onSnapshot(snapshot: MarketSnapshot, replayEngine: ReplayEngine): TradeSignal[];
+  decide(q: QuoteLike, context: TickContext): Side | null;
+  size(q: QuoteLike, context: TickContext): number;
 }
 
-export interface BacktestResult {
-  strategy: string;
-  startTime: number;
-  endTime: number;
-  duration: number;
-  stats: ReplayStats;
-  snapshotCount: number;
+type QuoteLike = {
+  bid: number;
+  ask: number;
+  bidSize: number;
+  askSize: number;
+  mid: number;
+  spread: number;
+  ccMid?: number;
+  pcMid?: number;
+  bucket?: string;
+};
+
+type TickContext = {
+  ts: number;
+  symbol: string;
+  strike: number;
+  expiryMs: number;
+  optionType: OptionType;
+};
+
+function strikeGrid(F: number): number[] {
+  const low = Math.floor(F * 0.9 / 100) * 100;
+  const high = Math.ceil(F * 1.1 / 100) * 100;
+  const strikes: number[] = [];
+  for (let k = low; k <= high; k += 100) strikes.push(k);
+  return strikes;
+}
+
+function tradeEdgeUSD(side: Side, ccMid: number, bid: number, ask: number): number {
+  return side === "SELL" ? ask - ccMid : ccMid - bid;
+}
+
+export class PassiveMMStrategy implements Strategy {
+  name = "Passive Market Making";
+  constructor(private maxSpreadUSD = 5000, private blockSize = 1) {}
+
+  decide(q: QuoteLike): Side | null {
+    if (!Number.isFinite(q.bid) || !Number.isFinite(q.ask)) return null;
+    if (q.ask <= 0 || q.bid < 0) return null;
+    if (q.spread > this.maxSpreadUSD) return null;
+    if ((q.askSize || 0) >= this.blockSize) return "SELL";
+    if ((q.bidSize || 0) >= this.blockSize) return "BUY";
+    return null;
+  }
+  size(): number { return this.blockSize; }
+}
+
+export class InventoryAwareStrategy implements Strategy {
+  name = "Inventory-Aware MM";
+  constructor(private maxSpreadUSD = 5000, private blockSize = 1) {}
+
+  decide(q: QuoteLike): Side | null {
+    if (!Number.isFinite(q.bid) || !Number.isFinite(q.ask)) return null;
+    if (q.spread > this.maxSpreadUSD) return null;
+    if ((q.askSize || 0) >= this.blockSize) return "SELL";
+    if ((q.bidSize || 0) >= this.blockSize) return "BUY";
+    // fallback: just sell if nothing else
+    return "SELL";
+  }
+  size(): number { return this.blockSize; }
 }
 
 export class Backtester {
-  private replayEngine: ReplayEngine;
-  private recorder: MarketRecorder;
-
-  constructor(prisma: PrismaClient) {
-    this.replayEngine = new ReplayEngine();
-    this.recorder = new MarketRecorder(prisma);
-  }
+  constructor(private prisma: PrismaClient) {}
 
   async runBacktest(
-    strategy: BacktestStrategy,
+    strat: Strategy,
     symbol: string,
     startTime: number,
-    endTime: number
-  ): Promise<BacktestResult> {
-    console.log(`\n=== Starting Backtest: ${strategy.name} ===`);
-    console.log(`Period: ${new Date(startTime)} to ${new Date(endTime)}`);
-
-    const snapshots = await this.recorder.loadSnapshots(symbol, startTime, endTime);
-    
-    if (snapshots.length === 0) {
-      throw new Error("No snapshots found for the specified period");
+    endTime: number,
+    optionType: OptionType = "P"
+  ): Promise<{ strategy: string; summary: BacktestResult }> {
+    const beats = await this.prisma.ticker.findMany({
+      where: { instrument: "BTC-PERPETUAL", tsMs: { gte: BigInt(startTime), lte: BigInt(endTime) } },
+      orderBy: { tsMs: "asc" },
+      select: { tsMs: true, markPrice: true, underlying: true }
+    });
+    if (beats.length === 0) {
+      return { strategy: strat.name, summary: { trades: 0, totalEdgeUSD: 0, avgEdgePerContractUSD: 0, winRatePct: 0, byTrade: [], inventory: {} } };
     }
 
-    console.log(`Loaded ${snapshots.length} snapshots`);
+    const byTrade: Trade[] = [];
+    const inventory: Record<number, { qty: number; avgPrice: number; totalEdge: number }> = {};
+    let trades = 0, totalEdgeUSD = 0, wins = 0;
 
-    await this.replayEngine.loadSnapshots(snapshots);
-    this.replayEngine.reset();
+    for (const b of beats) {
+      const ts = Number(b.tsMs);
+      const F = Number(b.markPrice ?? b.underlying ?? 0);
+      if (!Number.isFinite(F) || F <= 0) continue;
+      const expiryMs = ts + Math.round(14 * 24 * 3600 * 1000);
 
-    let snapshotCount = 0;
-    let tradeCount = 0;
+      for (const strike of strikeGrid(F)) {
+        const q = quoteEngine.getQuote({ symbol, strike, expiryMs, optionType, marketIV: 0.31 });
+        const side = strat.decide(q, { ts, symbol, strike, expiryMs, optionType });
+        if (!side) continue;
+        const size = strat.size(q, { ts, symbol, strike, expiryMs, optionType });
+        if (size <= 0) continue;
 
-    while (this.replayEngine.hasNext()) {
-      const snapshot = this.replayEngine.getCurrentSnapshot();
-      if (!snapshot) break;
+        const ccMid = q.ccMid ?? q.mid;
+        const edge = tradeEdgeUSD(side, ccMid, q.bid, q.ask);
 
-      snapshotCount++;
+        trades += size;
+        totalEdgeUSD += edge * size;
+        if (edge > 0) wins += size;
 
-      const signals = strategy.onSnapshot(snapshot, this.replayEngine);
+        // update inventory
+        const inv = inventory[strike] || { qty: 0, avgPrice: 0, totalEdge: 0 };
+        if (side === "SELL") inv.qty -= size; else inv.qty += size;
+        inv.totalEdge += edge * size;
+        inv.avgPrice = (inv.avgPrice * Math.abs(inv.qty) + (side === "SELL" ? q.ask : q.bid) * size) / (Math.abs(inv.qty) + size);
+        inventory[strike] = inv;
 
-      for (const signal of signals) {
-        const trade = this.replayEngine.simulateTrade(
-          signal.strike,
-          signal.expiry,
-          signal.side,
-          signal.size
-        );
-        if (trade) {
-          tradeCount++;
-          console.log(
-            `[${new Date(trade.timestamp).toISOString()}] ${trade.side} ${
-              trade.size
-            }x ${trade.strike} @ ${trade.ourPrice.toFixed(2)} (edge: ${trade.edge.toFixed(
-              2
-            )})`
-          );
-        }
+        byTrade.push({ ts, strike, expiryMs, side, optionType, price: side === "SELL" ? q.ask : q.bid, ccMid, edgeUSD: edge, bucket: q.bucket });
+        quoteEngine.executeTrade({ symbol, strike, expiryMs, optionType, side, size, price: side === "SELL" ? q.ask : q.bid, timestamp: ts } as any);
       }
-
-      this.replayEngine.step();
     }
 
-    const stats = this.replayEngine.getStats();
+    const avg = trades ? totalEdgeUSD / trades : 0;
+    const winRatePct = trades ? (wins / trades) * 100 : 0;
+    const summary: BacktestResult = { trades, totalEdgeUSD, avgEdgePerContractUSD: avg, winRatePct, byTrade, inventory };
 
-    console.log(`\n=== Backtest Complete ===`);
-    console.log(`Snapshots processed: ${snapshotCount}`);
-    console.log(`Trades executed: ${tradeCount}`);
-    console.log(`Total edge captured: ${stats.totalEdge.toFixed(2)}`);
-    console.log(`Average edge per contract: ${stats.avgEdge.toFixed(2)}`);
-    console.log(`Win rate: ${(stats.winRate * 100).toFixed(1)}%`);
-    console.log(`Max inventory: ${stats.maxInventory}`);
-    console.log(`Final inventory: ${stats.finalInventory}`);
-
-    return {
-      strategy: strategy.name,
-      startTime,
-      endTime,
-      duration: endTime - startTime,
-      stats,
-      snapshotCount,
-    };
+    this.printSummary(strat.name, summary);
+    return { strategy: strat.name, summary };
   }
-}
 
-// Aggressive Passive MM Strategy
-export class PassiveMMStrategy implements BacktestStrategy {
-  name = "Passive Market Making";
-
-  constructor(
-    private atmRange: number = 2000,     // Wider range
-    private minSpread: number = 20,      // Lower threshold (was 100)
-    private maxSize: number = 5          // Smaller size
-  ) {}
-
-  onSnapshot(snapshot: MarketSnapshot, engine: ReplayEngine): TradeSignal[] {
-    const signals: TradeSignal[] = [];
-
-    for (const option of snapshot.options) {
-      const isATM = Math.abs(option.strike - snapshot.forward) < this.atmRange;
-      const spread = option.ask - option.bid;
-      const hasWideSpread = spread > this.minSpread;
-
-      if (isATM && hasWideSpread && option.bid > 0 && option.ask > 0) {
-        // Sell on wide spreads
-        signals.push({
-          strike: option.strike,
-          expiry: option.expiry,
-          side: "SELL",
-          size: this.maxSize,
-        });
-      }
+  private printSummary(name: string, s: BacktestResult) {
+    console.log("\n--------------------------------------------------------------------------------");
+    console.log(`Results Summary — ${name}`);
+    console.log(`Trades executed:  ${s.trades}`);
+    console.log(`Total edge:       $${s.totalEdgeUSD.toFixed(2)}`);
+    console.log(`Avg edge/contract:$${s.avgEdgePerContractUSD.toFixed(4)}`);
+    console.log(`Win rate:         ${s.winRatePct.toFixed(1)}%`);
+    console.log("\nNet Inventory by Strike:");
+    console.log("Strike    Qty   AvgPx   Edge");
+    for (const k of Object.keys(s.inventory).sort((a,b)=>+a - +b)) {
+      const inv = s.inventory[+k];
+      console.log(`${k.padEnd(8)} ${inv.qty.toString().padStart(5)}   ${inv.avgPrice.toFixed(2).padStart(6)}   ${inv.totalEdge.toFixed(2).padStart(6)}`);
     }
-
-    return signals;
-  }
-}
-
-// Inventory-Aware Strategy
-export class InventoryAwareStrategy implements BacktestStrategy {
-  name = "Inventory-Aware MM";
-
-  constructor(
-    private maxInventory: number = 30,   // Lower limit
-    private atmRange: number = 2000      // Wider range
-  ) {}
-
-  onSnapshot(snapshot: MarketSnapshot, engine: ReplayEngine): TradeSignal[] {
-    const signals: TradeSignal[] = [];
-    const stats = engine.getStats();
-    const currentInventory = stats.finalInventory;
-
-    // Don't trade if inventory is too large
-    if (Math.abs(currentInventory) > this.maxInventory) {
-      return signals;
-    }
-
-    for (const option of snapshot.options) {
-      const isATM = Math.abs(option.strike - snapshot.forward) < this.atmRange;
-      
-      if (!isATM || option.bid === 0 || option.ask === 0) continue;
-
-      const spread = option.ask - option.bid;
-      
-      // Trade if spread is reasonable (>$20)
-      if (spread < 20) continue;
-      
-      // If long inventory, prefer selling
-      if (currentInventory > 5 && spread > 20) {
-        signals.push({
-          strike: option.strike,
-          expiry: option.expiry,
-          side: "SELL",
-          size: 3,
-        });
-      }
-      
-      // If short inventory, prefer buying
-      if (currentInventory < -5 && spread > 20) {
-        signals.push({
-          strike: option.strike,
-          expiry: option.expiry,
-          side: "BUY",
-          size: 3,
-        });
-      }
-      
-      // If flat, sell to start building edge
-      if (Math.abs(currentInventory) <= 5 && spread > 30) {
-        signals.push({
-          strike: option.strike,
-          expiry: option.expiry,
-          side: "SELL",
-          size: 2,
-        });
-      }
-    }
-
-    return signals;
   }
 }

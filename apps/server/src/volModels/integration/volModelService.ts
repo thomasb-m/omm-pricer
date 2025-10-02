@@ -1,118 +1,76 @@
-// apps/server/src/volModels/integration/volModelService.ts
+// Lightweight integration layer between QuoteEngine and your IntegratedSmileModel.
+// Matches the QuoteEngine's expectations: updateSpot, getQuoteWithIV, onCustomerTrade, getInventory.
 
-import { IntegratedSmileModel } from "../integratedSmileModel";
+import { IntegratedSmileModel } from "../IntegratedSmileModel";
 
-// ---- Types exposed by the service
-export type Side = "BUY" | "SELL";
-export type OptionType = "C" | "P";
 
-export interface QuoteOut {
-  bid: number;
-  ask: number;
-  bidSize: number;
-  askSize: number;
-  mid: number;
-  spread: number;
-  edge: number;
-  ccMid?: number;   // if you want to expose later
-  pcMid?: number;   // if you want to expose later
-  bucket?: string;
-}
+type Side = "BUY" | "SELL";
+type OptionType = "C" | "P";
 
-// ---- Internal per-symbol state
-type SymbolState = {
+interface SymbolState {
   model: IntegratedSmileModel;
-  forward: number;              // current forward (perp)
-};
-
-const YEAR_MS = 365.25 * 24 * 60 * 60 * 1000;
-
-// Conservative default forward if none set yet
-const DEFAULT_FORWARDS: Record<string, number> = {
-  BTC: 45000,
-  ETH: 3000,
-};
-
-function nowMs(): number {
-  return Date.now();
-}
-
-function ensureMs(expiryOrYears: number): number {
-  // Back-compat helper:
-  // If input is "small" (e.g. 0.08 years), treat as years-from-now → convert to ms.
-  // If input is a big number (> 10^10), assume it's already a ms timestamp.
-  if (expiryOrYears > 1e10) return Math.floor(expiryOrYears); // ms epoch
-  const Tyears = Math.max(expiryOrYears, 0);
-  return Math.floor(nowMs() + Tyears * YEAR_MS);
+  forward: number;
 }
 
 class VolModelService {
-  private symbols: Map<string, SymbolState> = new Map();
+  private symbols = new Map<string, SymbolState>();
 
-  // Get or create model for a symbol
-  private getState(symbol: string): SymbolState {
+  private ensure(symbol: string): SymbolState {
     let s = this.symbols.get(symbol);
     if (!s) {
-      s = {
-        model: new IntegratedSmileModel(), // default product config inside
-        forward: DEFAULT_FORWARDS[symbol] ?? DEFAULT_FORWARDS.BTC,
-      };
+      const model = new IntegratedSmileModel(symbol as any);
+      s = { model, forward: 45000 };
       this.symbols.set(symbol, s);
     }
     return s;
   }
 
-  // === Public API ===
-
-  /**
-   * Update the "spot" used by the model, which in our setup is the **forward** (perp).
-   * Keep this in sync with quoteEngine.updateForward(...)
-   */
-  updateSpot(symbol: string, forward: number): void {
-    const s = this.getState(symbol);
+  updateSpot(symbol: string, forward: number) {
+    const s = this.ensure(symbol);
     s.forward = forward;
   }
 
-  updateForward(symbol: string, forward: number): void {
-    this.updateSpot(symbol, forward);
-  }
-
   /**
-   * Get a quote, with optional ATM market IV to recalibrate.
-   * Back-compat: if expiry is passed in YEARS, we convert to ms from now.
+   * Quote path used by QuoteEngine.getQuote()
+   * It calls your model.getQuote(forward is passed in), and returns what QE expects.
    */
   getQuoteWithIV(
     symbol: string,
+    expiryMs: number,
     strike: number,
-    expiryMsOrYears: number,
-    marketIV?: number,
-    optionType: OptionType = "C"
-  ): QuoteOut {
-    const s = this.getState(symbol);
-    const expiryMs = ensureMs(expiryMsOrYears);
+    optionType: OptionType,
+    marketIV?: number
+  ) {
+    const s = this.ensure(symbol);
 
-    const q = s.model.getQuote(expiryMs, strike, s.forward, optionType, marketIV);
-    const mid = (q.bid + q.ask) / 2;
+    const q = s.model.getQuote(
+      expiryMs,
+      strike,
+      s.forward,
+      optionType,
+      marketIV
+    );
 
+    // Shape it exactly the way QuoteEngine expects to consume:
     return {
       bid: q.bid,
       ask: q.ask,
       bidSize: q.bidSize,
       askSize: q.askSize,
-      mid,
-      spread: q.ask - q.bid,
+      mid: (q.bid + q.ask) / 2,
+      spread: Math.max(0, q.ask - q.bid),
       edge: q.edge,
-      ccMid: q.ccMid,   // available if you want to surface it
-      pcMid: q.pcMid,   // available if you want to surface it
-      bucket: q.bucket, // useful for UI
+      pcMid: q.pcMid,
+      ccMid: q.ccMid,
+      bucket: q.bucket,
     };
   }
 
   /**
-   * Record a customer trade into the model.
-   * Preferred signature: include expiryMs and optionType.
-   * Back-compat shim: we accept calls without those, but we log a warning and
-   * apply a 1w default expiry and 'C' option type.
+   * Route a customer trade into the model so inventory/PC adjust.
+   * QuoteEngine already provides 'side' as CUSTOMER side. We'll pass size signed from customer perspective:
+   *  - BUY => +size
+   *  - SELL => -size
    */
   onCustomerTrade(
     symbol: string,
@@ -120,47 +78,31 @@ class VolModelService {
     side: Side,
     size: number,
     price: number,
-    expiryMs?: number,
-    optionType: OptionType = "C",
-    tradeTimeMs?: number,
-    marketIV?: number            // <- optional: ATM IV used at trade time
-  ): true {
-    const s = this.getState(symbol);
-  
-    let exp = expiryMs;
-    if (!exp) {
-      console.warn(`[volService] onCustomerTrade missing expiryMs. Using 7d default (back-compat).`);
-      exp = nowMs() + 7 * 24 * 3600 * 1000;
-    }
-  
-    // ✅ Ensure the surface exists & is calibrated for this expiry before we book the trade
-    //    (this will create/update the surface keyed by exp)
-    s.model.getQuote(exp!, strike, s.forward, optionType, marketIV);
-  
-    // Use CUSTOMER-side sign: BUY -> we are short -> negative size
-    const signedSize = side === "BUY" ? -Math.abs(size) : Math.abs(size);
-  
+    expiryMs: number,
+    optionType: OptionType,
+    timestamp?: number
+  ) {
+    const s = this.ensure(symbol);
+    const signedSize = side === "BUY" ? Math.max(0, size) : -Math.max(0, size);
+
     s.model.onTrade({
-      expiryMs: exp!,
+      expiryMs,
       strike,
       forward: s.forward,
       optionType,
       price,
-      size: signedSize,                 // keep customer-side convention
-      time: tradeTimeMs ?? nowMs(),
+      size: signedSize,      // signed from CUSTOMER perspective (per your model’s docstring)
+      time: timestamp ?? Date.now(),
     });
-  
-    return true;
   }
 
   /**
-   * Get inventory summary for a symbol (vega by bucket, smile adjustments, etc.)
+   * Inventory summary for UI/logging.
    */
   getInventory(symbol: string) {
-    const s = this.getState(symbol);
+    const s = this.ensure(symbol);
     return s.model.getInventorySummary();
   }
 }
 
-// Export singleton
 export const volService = new VolModelService();
