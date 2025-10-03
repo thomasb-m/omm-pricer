@@ -3,7 +3,7 @@ import { volService } from "../integration/volModelService";
 describe("volModelService.getQuoteWithIV", () => {
   test("returns finite quote for normal inputs", () => {
     const now = Date.now();
-    const res = volService.getQuoteWithIV("BTC", 100_000, now + 14*24*3600*1000, 0.31, "C");
+    const res = volService.getQuoteWithIV("BTC", 100_000, now + 14*24*3600*1000, "C", 0.31);
     expect(Number.isFinite(res.mid)).toBe(true);
     expect(res.spread).toBeGreaterThanOrEqual(0);
     expect(res.bid).toBeGreaterThanOrEqual(0);
