@@ -3,7 +3,6 @@
 
 import { IntegratedSmileModel } from '../integratedSmileModel';
 
-
 type Side = "BUY" | "SELL";
 type OptionType = "C" | "P";
 
@@ -30,14 +29,19 @@ class VolModelService {
     s.forward = forward;
   }
 
+  // Optional alias used elsewhere in the codebase
+  updateForward(symbol: string, forward: number) {
+    this.updateSpot(symbol, forward);
+  }
+
   /**
    * Quote path used by QuoteEngine.getQuote()
-   * It calls your model.getQuote(forward is passed in), and returns what QE expects.
+   * Calls model.getQuote (passing forward) and returns what QE expects.
    */
   getQuoteWithIV(
     symbol: string,
-    expiryMs: number,
     strike: number,
+    expiryMs: number,
     optionType: OptionType,
     marketIV?: number
   ) {
@@ -68,7 +72,8 @@ class VolModelService {
 
   /**
    * Route a customer trade into the model so inventory/PC adjust.
-   * QuoteEngine already provides 'side' as CUSTOMER side. We'll pass size signed from customer perspective:
+   * QuoteEngine provides 'side' as CUSTOMER side.
+   * We'll pass size signed from customer perspective:
    *  - BUY => +size
    *  - SELL => -size
    */
@@ -91,7 +96,7 @@ class VolModelService {
       forward: s.forward,
       optionType,
       price,
-      size: signedSize,      // signed from CUSTOMER perspective (per your model’s docstring)
+      size: signedSize, // customer-signed convention
       time: timestamp ?? Date.now(),
     });
   }
