@@ -14,7 +14,7 @@ describe("volModelService.getQuoteWithIV", () => {
     const now = Date.now();
     const expiryMs = now + 7*24*3600*1000;
     const bogusStrike = expiryMs;  // looks like ms timestamp
-    const res = volService.getQuoteWithIV("BTC", bogusStrike, 100_000, 0.31, "P");
+    const res = volService.getQuoteWithIV("BTC", bogusStrike, 100_000, "P", 0.31);
     expect(Number.isFinite(res.mid)).toBe(true);
     expect(res.spread).toBeGreaterThanOrEqual(0);
   });
