@@ -1,25 +1,30 @@
 /**
- * Finite-difference factor greeks g_i = ∂P/∂θ_i
+ * Finite-difference factor greeks g_i = ∂Price/∂θ_i
  * Safe, slow prototype; replace with closed-form SVI partials later.
- *
- * Factors: [L0, S0, C0, S_neg, S_pos, F]
- * Returns: dPrice/dθ_i (price units per absolute factor unit)
  */
 import { FactorVec } from "./FactorSpace";
 import { SVI, SVIParams } from "../dualSurfaceModel";
 import { black76Greeks } from "../../risk";
 
-const EPS: FactorVec = [1e-4, 1e-4, 1e-3, 1e-4, 1e-4, 1e-6];
-
-// Local helper: price from CC SVI at (K, T, F, isCall)
+/**
+ * Price from SVI CC parameters at (K, T, F, isCall) using Black-76.
+ * Vega convention: per absolute vol unit (consistent with black76Greeks).
+ */
 function priceFromSVI(cc: SVIParams, strike: number, T: number, F: number, isCall: boolean): number {
   const tiny = 1e-12;
-  const k = Math.log(strike / Math.max(F, tiny));
-  const varCC = Math.max(SVI.w(cc, k), tiny);
-  const iv = Math.max(Math.sqrt(varCC / Math.max(T, tiny)), 1e-8);
-  return black76Greeks(F, strike, Math.max(T, tiny), iv, isCall, 1.0).price;
+  const k = Math.log(Math.max(strike, tiny) / Math.max(F, tiny));
+  let varCC = SVI.w(cc, k);
+  if (!Number.isFinite(varCC) || varCC <= 0) varCC = tiny;
+  const iv = Math.sqrt(varCC / Math.max(T, tiny));
+  const g = black76Greeks(F, strike, Math.max(T, tiny), Math.max(iv, tiny), isCall, 1.0);
+  return g.price;
 }
 
+const EPS: FactorVec = [1e-4, 1e-4, 1e-3, 1e-4, 1e-4, 1e-6];
+
+/**
+ * Returns g = [∂P/∂L0, ∂P/∂S0, ∂P/∂C0, ∂P/∂S_neg, ∂P/∂S_pos, ∂P/∂F]
+ */
 export function factorGreeksFiniteDiff(
   cc: SVIParams,
   strike: number,
@@ -27,19 +32,16 @@ export function factorGreeksFiniteDiff(
   F: number,
   isCall: boolean
 ): FactorVec {
-  // Base price from CC
   const base = priceFromSVI(cc, strike, T, F, isCall);
 
-  // Map factor → small transform in metric space
   const m0 = SVI.toMetrics(cc);
+  const sviCfg = {
+    bMin: 0, sigmaMin: 1e-6, rhoMax: 0.999, sMax: 5, c0Min: 0.01,
+    buckets: [], edgeParams: new Map(), rbfWidth: 0, ridgeLambda: 0,
+    maxL0Move: 0, maxS0Move: 0, maxC0Move: 0
+  };
 
-  function bump(i: number): number {
-    // F bump handled separately (i === 5)
-    if (i === 5) {
-      const bumpedF = F + EPS[5];
-      return priceFromSVI(cc, strike, T, bumpedF, isCall) - base;
-    }
-
+  function bumpParam(i: number): number {
     const m = { ...m0 };
     switch (i) {
       case 0: m.L0    += EPS[0]; break;
@@ -47,24 +49,23 @@ export function factorGreeksFiniteDiff(
       case 2: m.C0    += EPS[2]; break;
       case 3: m.S_neg += EPS[3]; break;
       case 4: m.S_pos += EPS[4]; break;
-      default: break;
+      case 5: // F bump handled separately
+        return (priceFromSVI(cc, strike, T, F + EPS[5], isCall) - base) / EPS[5];
     }
-
-    const bumped = SVI.fromMetrics(m, {
-      bMin: 0, sigmaMin: 1e-6, rhoMax: 0.999, sMax: 5, c0Min: 0.01,
-      buckets: [], edgeParams: new Map(), rbfWidth: 0, ridgeLambda: 0,
-      maxL0Move: 0, maxS0Move: 0, maxC0Move: 0
-    });
-
-    return priceFromSVI(bumped, strike, T, F, isCall) - base;
+    const bumped = SVI.fromMetrics(m, sviCfg);
+    const pb = priceFromSVI(bumped, strike, T, F, isCall);
+    const dP = (pb - base);
+    const eps = EPS[i as 0|1|2|3|4];
+    return dP / eps;
   }
 
-  const g0 = bump(0) / EPS[0];
-  const g1 = bump(1) / EPS[1];
-  const g2 = bump(2) / EPS[2];
-  const g3 = bump(3) / EPS[3];
-  const g4 = bump(4) / EPS[4];
-  const g5 = bump(5) / EPS[5];
+  const g0 = bumpParam(0);
+  const g1 = bumpParam(1);
+  const g2 = bumpParam(2);
+  const g3 = bumpParam(3);
+  const g4 = bumpParam(4);
+  const g5 = bumpParam(5);
 
+  // Return as [L0, S0, C0, S_neg, S_pos, F]
   return [g0, g1, g2, g3, g4, g5];
 }

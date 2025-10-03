@@ -68,13 +68,7 @@ export class QuoteEngine {
     // Delegate to volService — this is where the single-calculus runs.
     // Ensure volService.getQuoteWithIV applies computePcQuote internally
     // and returns pcMid/ccMid/bucket in addition to the usual fields.
-    const q = volService.getQuoteWithIV(
-      req.symbol,
-      req.expiryMs,
-      req.strike,
-      req.optionType,
-      req.marketIV
-    );
+    const q = volService.getQuoteWithIV(req.symbol, req.strike, req.expiryMs, req.marketIV, req.optionType);
 
     // Optional size clamp by requested side/size
     let bidSize = q.bidSize;

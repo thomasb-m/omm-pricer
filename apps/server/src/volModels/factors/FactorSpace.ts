@@ -1,5 +1,7 @@
-// FactorSpace — types + helpers for factor calculus
-// Factors: θ = [L0, S0, C0, S_neg, S_pos, F]
+/**
+ * FactorSpace — types + helpers for factor calculus
+ * Factors: [L0, S0, C0, S_neg, S_pos, F]
+ */
 export type FactorVec = [number, number, number, number, number, number];
 export const ZeroFactors: FactorVec = [0, 0, 0, 0, 0, 0];
 
@@ -18,4 +20,15 @@ export function axpy(y: FactorVec, a: number, x: FactorVec): FactorVec {
     y[4] + a * x[4],
     y[5] + a * x[5],
   ];
+}
+
+export function norm1(a: FactorVec): number {
+  return (
+    Math.abs(a[0]) +
+    Math.abs(a[1]) +
+    Math.abs(a[2]) +
+    Math.abs(a[3]) +
+    Math.abs(a[4]) +
+    Math.abs(a[5])
+  );
 }
