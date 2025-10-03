@@ -51,19 +51,37 @@ class VolModelService {
       marketIV
     );
 
-    // Shape it exactly the way QuoteEngine expects to consume:
-    return {
-      bid: q.bid,
-      ask: q.ask,
-      bidSize: q.bidSize,
-      askSize: q.askSize,
-      mid: (q.bid + q.ask) / 2,
-      spread: Math.max(0, q.ask - q.bid),
-      edge: q.edge,
-      pcMid: q.pcMid,
-      ccMid: q.ccMid,
-      bucket: q.bucket,
-    };
+    // === λ·g mid shift (keep original width) ===
+const cc = s.model.getCCSVI(expiryMs);
+let adjBid = q.bid, adjAsk = q.ask, adjPcMid = q.pcMid ?? mid;
+try {
+  if (cc) {
+    const isCall = optionType === "C";
+    const T = Math.max(timeToExpiryYears(expiryMs), 1e-8);
+    const g = factorGreeksFiniteDiff(cc, strike, T, s.forward, isCall);
+    const ladg = dot(s.factors.lambda, g);
+    const half = Math.max(0, (q.ask - q.bid) / 2);
+    adjPcMid = (q.pcMid ?? mid) + (Number.isFinite(ladg) ? ladg : 0);
+    adjBid = Math.max(0, adjPcMid - half);
+    adjAsk = adjPcMid + half;
+  }
+} catch (_e) {
+  // keep original quotes on any calc issue
+}
+
+return {
+  bid: adjBid,
+  ask: adjAsk,
+  bidSize: q.bidSize,
+  askSize: q.askSize,
+  mid: (adjBid + adjAsk) / 2,
+  spread: Math.max(0, adjAsk - adjBid),
+  edge: q.edge,
+  ccMid: q.ccMid,
+  pcMid: adjPcMid,
+  bucket: q.bucket,
+};
+
   }
 
   /**
