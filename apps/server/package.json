@@ -6,7 +6,7 @@
   "main": "src/index.ts",
   "scripts": {
     "dev": "ts-node --transpile-only src/index.ts",
-    "test": "jest --runInBand",
+    "test": "jest --config jest.config.cjs --runInBand",
     "test:watch": "jest --watch"
   },
   "dependencies": {
