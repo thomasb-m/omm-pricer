@@ -1,7 +1,7 @@
 // Lightweight integration layer between QuoteEngine and your IntegratedSmileModel.
 // Matches the QuoteEngine's expectations: updateSpot, getQuoteWithIV, onCustomerTrade, getInventory.
 
-import { IntegratedSmileModel } from "../IntegratedSmileModel";
+import { IntegratedSmileModel } from '../integratedSmileModel';
 
 
 type Side = "BUY" | "SELL";
