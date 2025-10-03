@@ -307,4 +307,10 @@ export class IntegratedSmileModel {
     }
     return summary;
   }
+
+  // Expose Core Curve SVI for callers that need factor greeks off CC
+  getCCSVI(expiryMs: number) {
+    const s = this.surfaces.get(expiryMs);
+    return s ? s.cc : null;
+  }
 }

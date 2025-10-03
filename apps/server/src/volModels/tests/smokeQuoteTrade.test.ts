@@ -24,7 +24,7 @@ describe("Quote→Trade→Quote smoke", () => {
 
     // Inventory should not be zero anymore
     const inv = volService.getInventory(symbol);
-    expect(Math.abs(inv.totalVega ?? inv.total?.vega ?? 0)).toBeGreaterThan(0);
+    expect(Math.abs(inv.totalVega ?? 0)).toBeGreaterThan(0);
 
     // Mid should shift (not asserting direction because PC+λ·g both act; we just check movement)
     expect(Math.abs(q1.mid - q0.mid)).toBeGreaterThan(0);
