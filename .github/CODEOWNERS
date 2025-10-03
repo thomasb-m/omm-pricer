@@ -1,0 +1,6 @@
+# Keep tight control over critical paths. Adjust handles as needed.
+*                   @thomasb-m
+# Examples if you want finer control:
+# /apps/server/     @thomasb-m
+# /apps/web/        @thomasb-m
+# /packages/        @thomasb-m
