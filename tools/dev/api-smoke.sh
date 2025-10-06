@@ -20,7 +20,7 @@ node -e "
 const e=Date.now()+14*24*3600*1000;
 fetch('${BASE:-http://localhost:3001}/quote',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({symbol:'BTC',strike:90000,expiryMs:e,optionType:'P',marketIV:0.31})})
 .then(r=>r.json())
-.then(q=>fetch('${BASE:-http://localhost:3001}/trade/execute',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({symbol:'BTC',strike:90000,expiryMs:e,optionType:'P',side:'BUY',size:50,price:q.ask})}))
+.then(q=>fetch('${BASE:-http://localhost:3001}/trade/execute',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({symbol:'BTC',strike:90000,expiryMs:q.expiryMs,optionType:'P',side:'BUY',size:50,price:q.ask,marketIV:0.31})}))
 .then(r=>r.json()).then(x=>console.log(x));
 "
 

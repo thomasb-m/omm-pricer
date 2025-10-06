@@ -54,7 +54,17 @@ export class IntegratedSmileModel {
 
   private deriveMetricsFromMarketIV(atmIV: number, expiryYears: number): TraderMetrics {
     const L0 = atmIV * atmIV * expiryYears;
-    return { L0, S0: -0.02, C0: 0.5, S_neg: -0.8, S_pos: 0.9 };
+    
+    // Scale wing slopes with L0 to maintain consistency
+    const scale = Math.sqrt(Math.max(L0, 0.001) / 0.04);  // Normalize to typical L0~0.04
+    
+    return { 
+      L0, 
+      S0: -0.02 * scale, 
+      C0: 0.5, 
+      S_neg: -0.8 * scale, 
+      S_pos: 0.9 * scale 
+    };
   }
   private convertToSVIConfig(mc: ModelConfig): any {
     const edgeParams = new Map<string, any>();
@@ -98,9 +108,14 @@ export class IntegratedSmileModel {
     const k = Math.log(K / Math.max(F, tiny));
 
     let ccVar = SVI.w(s.cc, k);
-    if (!Number.isFinite(ccVar) || ccVar <= 0) ccVar = Math.max(ivFallback*ivFallback*Math.max(T,1e-8), 1e-12);
+
+    if (!Number.isFinite(ccVar) || ccVar <= 0) {
+      const fallbackVar = ivFallback*ivFallback*Math.max(T,1e-8);
+      console.log(`[onTrade] Using fallback variance: ${fallbackVar}`);
+      ccVar = Math.max(fallbackVar, 1e-12);
+    }
     let ccIV = Math.sqrt(ccVar / Math.max(T,1e-12));
-    if (!Number.isFinite(ccIV) || ccIV <= 0) ccIV = Math.max(ivFallback, 1e-8);
+    console.log(`[onTrade] After fallback: ccVar=${ccVar}, ccIV=${ccIV}`);
 
     // ⬇️ Floor the IV used for VEGA calc to avoid pdf(d1) → 0 on wings
     const ivMin = Math.max(0.15, 0.5 * ivFallback);     // 15% absolute or ½ ATM

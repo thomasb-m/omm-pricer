@@ -1,5 +1,8 @@
 import { PrismaClient } from "@prisma/client";
 import { quoteEngine } from "../quoteEngine";
+import { VolModelService } from "../services/volModelService";
+import { TradeLog } from "../logging/tradeLog";
+
 
 export type Side = "BUY" | "SELL";
 export type OptionType = "C" | "P";
@@ -121,30 +124,47 @@ export class Backtester {
       const F = Number(b.markPrice ?? b.underlying ?? 0);
       if (!Number.isFinite(F) || F <= 0) continue;
       const expiryMs = ts + Math.round(14 * 24 * 3600 * 1000);
-
+    
+      // Estimate ATM IV from recent market (simple heuristic: 30-80 vol in BTC terms)
+      const atmIV = 0.35; // Placeholder - should come from market data
+    
       for (const strike of strikeGrid(F)) {
-        const q = quoteEngine.getQuote({ symbol, strike, expiryMs, optionType, marketIV: 0.31 });
+        const q = quoteEngine.getQuote({ 
+          symbol, strike, expiryMs, optionType, 
+          marketIV: atmIV  // Use dynamic IV here
+        });
+        
         const side = strat.decide(q, { ts, symbol, strike, expiryMs, optionType });
         if (!side) continue;
         const size = strat.size(q, { ts, symbol, strike, expiryMs, optionType });
         if (size <= 0) continue;
-
+    
         const ccMid = q.ccMid ?? q.mid;
         const edge = tradeEdgeUSD(side, ccMid, q.bid, q.ask);
-
+    
         trades += size;
         totalEdgeUSD += edge * size;
         if (edge > 0) wins += size;
-
+    
         // update inventory
         const inv = inventory[strike] || { qty: 0, avgPrice: 0, totalEdge: 0 };
         if (side === "SELL") inv.qty -= size; else inv.qty += size;
         inv.totalEdge += edge * size;
         inv.avgPrice = (inv.avgPrice * Math.abs(inv.qty) + (side === "SELL" ? q.ask : q.bid) * size) / (Math.abs(inv.qty) + size);
         inventory[strike] = inv;
-
-        byTrade.push({ ts, strike, expiryMs, side, optionType, price: side === "SELL" ? q.ask : q.bid, ccMid, edgeUSD: edge, bucket: q.bucket });
-        quoteEngine.executeTrade({ symbol, strike, expiryMs, optionType, side, size, price: side === "SELL" ? q.ask : q.bid, timestamp: ts } as any);
+    
+        byTrade.push({ 
+          ts, strike, expiryMs, side, optionType, 
+          price: side === "SELL" ? q.ask : q.bid, 
+          ccMid, edgeUSD: edge, bucket: q.bucket 
+        });
+        
+        quoteEngine.executeTrade({ 
+          symbol, strike, expiryMs, optionType, side, size, 
+          price: side === "SELL" ? q.ask : q.bid, 
+          timestamp: ts,
+          marketIV: atmIV  // Pass through for proper surface calibration
+        });
       }
     }
 

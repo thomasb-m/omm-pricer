@@ -40,6 +40,7 @@ export interface Trade {
   size: number;
   price: number;
   timestamp: number;
+  marketIV?: number; 
 }
 
 export class QuoteEngine {
@@ -68,7 +69,13 @@ export class QuoteEngine {
     // Delegate to volService — this is where the single-calculus runs.
     // Ensure volService.getQuoteWithIV applies computePcQuote internally
     // and returns pcMid/ccMid/bucket in addition to the usual fields.
-    const q = volService.getQuoteWithIV(req.symbol, req.strike, req.expiryMs, req.marketIV, req.optionType);
+    const q = volService.getQuoteWithIV(
+      req.symbol, 
+      req.strike, 
+      req.expiryMs, 
+      req.marketIV,     // ← 4th argument
+      req.optionType    // ← 5th argument
+    );
 
     // Optional size clamp by requested side/size
     let bidSize = q.bidSize;
@@ -116,24 +123,28 @@ export class QuoteEngine {
   }
 
   executeTrade(trade: Trade): void {
+    // Extract marketIV from trade (it's optional)
+    const marketIV = trade.marketIV;  // ← Add this line
+    
     // Route trade into the model (customer side; service handles signs/inventory)
     volService.onCustomerTrade(
       trade.symbol,
       trade.strike,
-      trade.side,                // "BUY" | "SELL" (customer side)
+      trade.side,
       trade.size,
       trade.price,
       trade.expiryMs,
       trade.optionType,
-      trade.timestamp
+      trade.timestamp,
+      marketIV  // ← Now this variable exists
     );
-
+  
     console.log(
       `Trade executed: Customer ${trade.side} ${trade.size}x ${trade.symbol} ` +
-      `${trade.optionType} ${trade.strike} @ ${trade.price}`
+      `${trade.optionType} ${trade.strike} @ ${trade.price}` +
+      (marketIV ? ` (IV=${(marketIV*100).toFixed(1)}%)` : '')
     );
-
-    // Optional: quick inventory diagnostics
+  
     const inv = volService.getInventory(trade.symbol);
     if (inv && typeof inv.totalVega === "number") {
       console.log(`${trade.symbol} inventory: ${inv.totalVega.toFixed(1)} vega`);

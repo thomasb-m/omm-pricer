@@ -74,9 +74,10 @@ class VolModelService {
     symbol: string,
     strike: number,
     expiryMsOrYears: number,
-    optionType: OptionType = "C",
-    marketIV?: number
+    marketIV?: number,        // ← Move marketIV before optionType
+    optionType: OptionType = "C"
   ) {
+    
     const s = this.ensure(symbol);
     const expiryMs = ensureMs(expiryMsOrYears);
 
@@ -136,24 +137,44 @@ class VolModelService {
     const s = this.ensure(symbol);
     const t = timestamp ?? nowMs();
 
+    console.log(`[volService.onCustomerTrade] marketIV=${marketIV}, expiryMs=${expiryMs}`);
     // Ensure the surface exists (will also (re)calibrate if marketIV provided)
     s.model.getQuote(expiryMs, strike, s.forward, optionType, marketIV);
+
+    // Ensure the surface exists (will also (re)calibrate if marketIV provided)
+    s.model.getQuote(expiryMs, strike, s.forward, optionType, marketIV);
+
+    // Verify surface was created properly
+    const cc = s.model.getCCSVI(expiryMs);
+    if (cc) {
+      console.log(`[volService] CC after getQuote: a=${cc.a}, b=${cc.b}, rho=${cc.rho}, sigma=${cc.sigma}, m=${cc.m}`);
+      if (cc.a === null || !Number.isFinite(cc.a)) {
+        console.error(`[volService] INVALID CC: a=${cc.a} - surface calibration failed`);
+  }
+}
 
     // Customer side → signed size for our inventory: BUY => we are short
     const signedSize = side === "BUY" ? -Math.abs(size) : +Math.abs(size);
 
     // Update factor inventory via CC-based greeks at trade point
-    try {
-      const cc = s.model.getCCSVI(expiryMs);
-      if (cc) {
-        const T = Math.max(timeToExpiryYears(expiryMs, t), 1e-8);
-        const isCall = optionType === "C";
-        const g = factorGreeksFiniteDiff(cc, strike, T, s.forward, isCall);
-        s.inventory = axpy(s.inventory, signedSize, g);
-      }
-    } catch {
-      // best-effort inventory; model booking still happens
-    }
+try {
+  const cc = s.model.getCCSVI(expiryMs);
+  if (cc) {
+    console.log(`[volService] Computing factor greeks: K=${strike}, T=${timeToExpiryYears(expiryMs, t)}, F=${s.forward}, optionType=${optionType}`);
+    const T = Math.max(timeToExpiryYears(expiryMs, t), 1e-8);
+    const isCall = optionType === "C";
+    const g = factorGreeksFiniteDiff(cc, strike, T, s.forward, isCall);
+    console.log(`[volService] Factor greeks: g=[${g.map(x => x.toFixed(6)).join(', ')}]`);
+    console.log(`[volService] I_old=[${s.inventory.map(x => x.toFixed(2)).join(', ')}]`);
+    s.inventory = axpy(s.inventory, signedSize, g);
+    console.log(`[volService] I_new=[${s.inventory.map(x => x.toFixed(2)).join(', ')}] (signedSize=${signedSize})`);
+  } else {
+    console.warn(`[volService] No CC surface found for expiryMs=${expiryMs}`);
+  }
+} catch (err) {
+  console.error(`[volService] Factor inventory update FAILED:`, err);
+  // best-effort inventory; model booking still happens
+}
 
     // Book into model (inventory-aware PC inside model adjusts too)
     s.model.onTrade({
