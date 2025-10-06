@@ -1,12 +1,11 @@
 /**
  * Integrated Dual Surface Model with Market Calibration
+ * Convention: TradeExecution.size is **DEALER-signed**
+ *   - Customer BUY  => dealer SELL  => size = -|q|
+ *   - Customer SELL => dealer BUY   => size = +|q|
  */
 import {
-  SVIParams,
-  TraderMetrics,
-  NodeState,
-  SVI,
-  RiskScorer
+  SVIParams, TraderMetrics, NodeState, SVI, RiskScorer
 } from './dualSurfaceModel';
 import { ModelConfig, getDefaultConfig } from './config/modelConfig';
 import { SmileInventoryController } from './smileInventoryController';
@@ -29,14 +28,11 @@ export interface TradeExecution {
   forward: number;
   optionType: 'C' | 'P';
   price: number;
-  size: number;      // signed from CUSTOMER perspective
+  size: number;      // ✅ DEALER-signed size (see header)
   time: number;
 }
 export interface EnhancedSurface {
-  expiry: number;
-  cc: SVIParams;
-  pc: SVIParams;
-  nodes: Map<number, NodeState>;
+  expiry: number; cc: SVIParams; pc: SVIParams; nodes: Map<number, NodeState>;
 }
 export interface MarketQuoteForCalibration { strike: number; iv: number; weight?: number; }
 
@@ -90,13 +86,13 @@ export class IntegratedSmileModel {
     const T = timeToExpiryYears(trade.expiryMs, trade.time ?? Date.now());
     if (T <= 0) { console.warn('Expired trade ignored (T<=0):', trade); return; }
 
-    // Maintain node state
+    // Keep node state fresh
     this.updateNodeState(s, {
       strike: trade.strike, price: trade.price, size: trade.size,
       expiryMs: trade.expiryMs, forward: trade.forward, optionType: trade.optionType, time: trade.time ?? Date.now()
     } as any);
 
-    // Robust IV/vega
+    // Robust vega for inventory update
     const F = trade.forward, K = trade.strike, isCall = trade.optionType === 'C';
     const ivFallback = this.marketIVs.get(trade.expiryMs) ?? 0.35;
     const k = Math.log(K / Math.max(F, tiny));
@@ -111,8 +107,10 @@ export class IntegratedSmileModel {
     const vegaSafe = Number.isFinite(g.vega) ? g.vega : 0;
 
     const bucket = DeltaConventions.strikeToBucket(K, F, ccIV, Math.max(T,1e-8));
-    this.inventoryController.updateInventory(K, trade.size, vegaSafe, bucket);
+    // 🔎 Debug
+    console.log(`[ISM.onTrade] bucket=${bucket} K=${K} size(dealer)=${trade.size} vega=${vegaSafe} product=${trade.size * vegaSafe}`);
 
+    this.inventoryController.updateInventory(K, trade.size, vegaSafe, bucket);
     this.updatePC(s);
     this.version++;
   }
@@ -206,7 +204,7 @@ export class IntegratedSmileModel {
     const ask = pcMid + currentWidth;
     const edge = pcMid - ccMid;
 
-    // inventory-aware sizes (simple rule)
+    // Inventory-aware sizes (simple)
     const baseSize = this.config.quotes.sizeBlocks;
     const invState = this.inventoryController.getInventoryState();
     const bucketInv = invState.get(bucket as any);
@@ -227,8 +225,9 @@ export class IntegratedSmileModel {
     const adjustments = this.inventoryController.calculateSmileAdjustments();
     const summary = { totalVega: 0, byBucket: {} as any, smileAdjustments: adjustments };
     for (const [bucket, inv] of invState) {
-      summary.totalVega += (Number(inv.vega) || 0);
-      (summary.byBucket as any)[bucket] = { vega: (Number(inv.vega) || 0), count: inv.count };
+      const v = Number(inv.vega) || 0;
+      summary.totalVega += v;
+      (summary.byBucket as any)[bucket] = { vega: v, count: inv.count };
     }
     return summary;
   }

@@ -1,8 +1,8 @@
 /**
  * Smile-based Inventory Controller
- * Adjusts entire smile shape based on inventory, not local bumps
+ * Expects **DEALER-signed** size in updateInventory(size).
+ * We accumulate bucket vega as: inv.vega += size * option_vega.
  */
-
 import { SVIParams, SVI, TraderMetrics } from './dualSurfaceModel';
 import { ModelConfig } from './config/modelConfig';
 
@@ -30,7 +30,7 @@ export class SmileInventoryController {
     this.inventory = new Map();
   }
 
-  /** Update inventory after trade (numeric-safe) */
+  /** Update inventory after trade — expects DEALER-signed size */
   updateInventory(strike: number, size: number, vega: number, bucket: string): void {
     const s = Number(size) || 0;
     const v = Number(vega) || 0;
@@ -41,15 +41,16 @@ export class SmileInventoryController {
       this.inventory.set(bucket, bucketInv);
     }
 
-    bucketInv.vega = (Number(bucketInv.vega) || 0) + s * v;
+    const deltaV = s * v;
+    bucketInv.vega = (Number(bucketInv.vega) || 0) + deltaV;
     bucketInv.count = (Number(bucketInv.count) || 0) + 1;
+    if (!bucketInv.strikes.includes(strike)) bucketInv.strikes.push(strike);
 
-    if (!bucketInv.strikes.includes(strike)) {
-      bucketInv.strikes.push(strike);
-    }
+    // 🔎 Debug
+    console.log(`[SIC.updateInv] bucket=${bucket} strike=${strike} size(dealer)=${s} vega=${v} Δvega=${deltaV} agg=${bucketInv.vega}`);
   }
 
-  /** Calculate smile adjustments from inventory (numeric-safe + coalesced params) */
+  /** Map inventory to smile parameter adjustments */
   calculateSmileAdjustments(): SmileAdjustments {
     let deltaL0 = 0, deltaS0 = 0, deltaC0 = 0, deltaSNeg = 0, deltaSPos = 0;
 
@@ -66,12 +67,11 @@ export class SmileInventoryController {
       const Vref  = Math.max(Number(cfg.edgeParams?.Vref) || 1, 1e-6);
 
       const normalized = Math.abs(bucketVega) / Vref;
+      // Negative for SHORT (bucketVega < 0) -> wants higher prices
       const edgeRequired = -Math.sign(bucketVega) * (E0 + kappa * Math.pow(normalized, gamma));
       inv.edgeRequired = edgeRequired;
 
-      // scale edge (ticks) to vol changes for visibility
       const TICK_TO_VOL = 0.005;
-
       switch (bucket) {
         case 'atm':
           deltaL0 += edgeRequired * TICK_TO_VOL * 1.0;
@@ -105,21 +105,15 @@ export class SmileInventoryController {
       }
     }
 
-    return {
-      deltaL0: +deltaL0 || 0,
-      deltaS0: +deltaS0 || 0,
-      deltaC0: +deltaC0 || 0,
-      deltaSNeg: +deltaSNeg || 0,
-      deltaSPos: +deltaSPos || 0,
-    };
+    return { deltaL0, deltaS0, deltaC0, deltaSNeg, deltaSPos };
   }
 
-  /** Apply adjustments to create PC from CC (with backoff for validity) */
+  /** Create PC from CC with backoff */
   adjustSVIForInventory(ccParams: SVIParams): SVIParams {
     const base = SVI.toMetrics(ccParams);
     const adj = this.calculateSmileAdjustments();
 
-    const candidate = (scale: number) => {
+    const make = (scale: number) => {
       const m: TraderMetrics = {
         L0: Math.max(0.001, base.L0 + adj.deltaL0 * scale),
         S0: base.S0 + adj.deltaS0 * scale,
@@ -130,11 +124,11 @@ export class SmileInventoryController {
       return SVI.fromMetrics(m, this.createSVIConfig());
     };
 
-    let pc = candidate(1.0);
+    let pc = make(1.0);
     if (!SVI.validate(pc, this.createSVIConfig())) {
       let s = 0.5;
       while (s > 1e-3) {
-        pc = candidate(s);
+        pc = make(s);
         if (SVI.validate(pc, this.createSVIConfig())) break;
         s *= 0.5;
       }
@@ -167,26 +161,16 @@ export class SmileInventoryController {
     return new Map(this.inventory);
   }
 
-  /** Diagnostic summary (numeric-safe) */
   getInventory() {
     const total = { vega: 0, gamma: 0, theta: 0 };
     const byBucket: any = {};
-
     for (const [bucket, inv] of this.inventory) {
       const v = Number(inv.vega) || 0;
       total.vega += v;
       byBucket[bucket] = { vega: v, count: inv.count };
     }
-
-    return {
-      total,
-      totalVega: total.vega,
-      byBucket,
-      smileAdjustments: this.calculateSmileAdjustments()
-    };
+    return { total, totalVega: total.vega, byBucket, smileAdjustments: this.calculateSmileAdjustments() };
   }
 
-  clearInventory(): void {
-    this.inventory.clear();
-  }
+  clearInventory(): void { this.inventory.clear(); }
 }
