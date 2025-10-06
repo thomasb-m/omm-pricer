@@ -89,3 +89,5 @@ public
 # Temporary folders
 tmp/
 temp/
+# local sqlite db
+apps/server/prisma/prisma/dev.db
