@@ -95,7 +95,7 @@ export class QuoteEngine {
       askSize,
       mid: q.mid,
       spread: q.spread,
-      edge: q.edge,
+      edge: (q.pcMid ?? q.mid) - (q.ccMid ?? q.mid),
       forward,
       timestamp: Date.now(),
       pcMid: q.pcMid,   // passthrough from volService (pricing curve mid)

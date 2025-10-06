@@ -165,9 +165,9 @@ function normCdf(x: number): number {
       r: number = 0
     ): string {
       const delta = Math.abs(this.spotDelta({ strike, spot, vol, T, r, isCall: false })); // put-delta convention
-      if (delta >= 0.45 && delta <= 0.55) return 'atm';
-      if (delta >= 0.20 && delta <= 0.30) return 'rr25';
-      if (delta >= 0.08 && delta <= 0.12) return 'rr10';
+      if (delta >= 0.40 && delta <= 0.60) return 'atm';
+      if (delta >= 0.18 && delta <= 0.32) return 'rr25';
+      if (delta >= 0.06 && delta <= 0.14) return 'rr10';
       return 'wings';
     }
   }
