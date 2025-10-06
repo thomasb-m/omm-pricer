@@ -92,7 +92,7 @@ export class IntegratedSmileModel {
       expiryMs: trade.expiryMs, forward: trade.forward, optionType: trade.optionType, time: trade.time ?? Date.now()
     } as any);
 
-    // Robust vega for inventory update
+    // Robust vega for inventory update (with IV floor)
     const F = trade.forward, K = trade.strike, isCall = trade.optionType === 'C';
     const ivFallback = this.marketIVs.get(trade.expiryMs) ?? 0.35;
     const k = Math.log(K / Math.max(F, tiny));
@@ -102,13 +102,19 @@ export class IntegratedSmileModel {
     let ccIV = Math.sqrt(ccVar / Math.max(T,1e-12));
     if (!Number.isFinite(ccIV) || ccIV <= 0) ccIV = Math.max(ivFallback, 1e-8);
 
-    let g = black76Greeks(F, K, Math.max(T,1e-8), ccIV, isCall, 1.0);
-    if (!Number.isFinite(g.vega)) g = black76Greeks(F, K, Math.max(T,1e-8), Math.max(ivFallback,1e-8), isCall, 1.0);
+    // ⬇️ Floor the IV used for VEGA calc to avoid pdf(d1) → 0 on wings
+    const ivMin = Math.max(0.15, 0.5 * ivFallback);     // 15% absolute or ½ ATM
+    const ivUsed = Math.max(ccIV, ivMin);
+
+    let g = black76Greeks(F, K, Math.max(T,1e-8), ivUsed, isCall, 1.0);
+    if (!Number.isFinite(g.vega)) {
+      g = black76Greeks(F, K, Math.max(T,1e-8), Math.max(ivFallback, ivMin), isCall, 1.0);
+    }
     const vegaSafe = Number.isFinite(g.vega) ? g.vega : 0;
 
-    const bucket = DeltaConventions.strikeToBucket(K, F, ccIV, Math.max(T,1e-8));
+    const bucket = DeltaConventions.strikeToBucket(K, F, ivUsed, Math.max(T,1e-8));
     // 🔎 Debug
-    console.log(`[ISM.onTrade] bucket=${bucket} K=${K} size(dealer)=${trade.size} vega=${vegaSafe} product=${trade.size * vegaSafe}`);
+    console.log(`[ISM.onTrade] bucket=${bucket} K=${K} size(dealer)=${trade.size} ccIV=${ccIV} ivUsed=${ivUsed} vega=${vegaSafe} product=${trade.size * vegaSafe}`);
 
     this.inventoryController.updateInventory(K, trade.size, vegaSafe, bucket);
     this.updatePC(s);
