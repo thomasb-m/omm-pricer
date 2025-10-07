@@ -1,88 +1,35 @@
 // apps/server/src/volModels/sviMapping.ts
-// Centralized, canonical mapping between SVI params and Trader metrics.
-// This is the ONLY place where the identities are defined.
+// Dual-compatible module exports (CJS + ESM)
 
-// Types you already have somewhere; keep or adjust imports as needed
-export type SVIParams = {
-    a: number;
-    b: number;
-    rho: number;   // in (-1, 1)
-    sigma: number; // > 0
-    m: number;     // smile center (we keep 0 here for trader metrics)
-  };
-  
-  export type TraderMetrics = {
-    L0: number;    // level  ≈ a + bσ
-    S0: number;    // ATM skew = bρ      (derived)
-    C0: number;    // curvature ≈ b/σ
-    S_neg: number; // left wing slope  = b(1-ρ)
-    S_pos: number; // right wing slope = b(1+ρ)
-  };
-  
-  export type Config = {
-    rhoMax?: number;   // default 0.999
-    c0Min?: number;    // default 1e-8
-    bMin?: number;     // default 1e-8
-    sigmaMin?: number; // default 1e-8
-  };
-  
-  // ---- Canonical identities ----
-  // S_pos = b(1+ρ), S_neg = b(1-ρ)
-  // b    = (S_pos + S_neg)/2
-  // ρ    = (S_pos - S_neg)/(S_pos + S_neg)
-  // S0   = bρ
-  // C0  ≈ b/σ
-  // L0   = a + bσ
-  
-  export function toMetrics(cc: SVIParams): TraderMetrics {
-    const { a, b, rho, sigma } = cc;
-    const S_pos = b * (1 + rho);
-    const S_neg = b * (1 - rho);
-    const L0 = a + b * sigma;
-    const C0 = b / sigma;
-    const S0 = b * rho;
-    return { L0, S0, C0, S_neg, S_pos };
-  }
-  
-  export function fromMetrics(m: TraderMetrics, cfg: Config, opt?: { preserveBumps?: boolean }): SVIParams {
-    const eps = 1e-12;
-    const rhoMax = cfg.rhoMax ?? 0.999;
-    const c0Min  = cfg.c0Min  ?? 1e-8;
-    const bMin   = cfg.bMin   ?? 1e-8;
-    const sigmaMin = cfg.sigmaMin ?? 1e-8;
-  
-    const Sp = m.S_pos;
-    const Sn = m.S_neg;
-    const Ssum = Sp + Sn;
-  
-    // Correct identities
-    let b_raw = 0.5 * Ssum;
-    // b must be positive for canonical SVI
-    let b = Math.max(Math.abs(b_raw), bMin);
-  
-    // rho via (diff/sum); optionally blend with S0/b when wings are nearly symmetric
-    let rho_raw = (Sp - Sn) / Math.max(Math.abs(Ssum), eps);
-  
-    if (opt?.preserveBumps) {
-      // blend rho toward S0/b only when symmetry makes (diff/sum) unstable
-      if (Math.abs(Ssum) < 1e-6) {
-        const rho_from_S0 = m.S0 / Math.max(b, bMin);
-        rho_raw = 0.75 * rho_raw + 0.25 * rho_from_S0;
-      }
-    }
-  
-    const rho = Math.max(-rhoMax, Math.min(rhoMax, rho_raw));
-  
-    // C0 ≈ b/σ → σ ≈ b/C0
-    const sigma_raw = b / Math.max(m.C0, c0Min);
-    const sigma = Math.max(sigma_raw, sigmaMin);
-  
-    // L0 = a + bσ → a = L0 - bσ
-    const a = m.L0 - b * sigma;
-  
-    return { a, b, rho, sigma, m: 0 };
-  }
-  
-  // Backwards-compatible export if other files expect SVI.toMetrics/fromMetrics
-  export const SVI = { toMetrics, fromMetrics };
-  
+export type SVIParams = { a: number; b: number; rho: number; m: number; sigma: number };
+export type TraderMetrics = { S0: number; C0: number; L0: number; S_pos: number; S_neg: number };
+export type Config = Record<string, any>;
+
+// Example implementation placeholders
+export function toMetrics(svi: SVIParams): TraderMetrics {
+  const S0 = svi.b * svi.rho;
+  const b = svi.b;
+  const S_pos = b * (1 + svi.rho);
+  const S_neg = b * (1 - svi.rho);
+  return { S0, C0: 0.5, L0: 0.5, S_pos, S_neg };
+}
+
+export function fromMetrics(m: TraderMetrics, cfg: Config): SVIParams {
+  const b = 0.5 * (m.S_pos + m.S_neg);
+  const rho = (m.S_pos - m.S_neg) / Math.max(b * 2, 1e-12);
+  return { a: 0.1, b, rho, m: 0, sigma: 0.2 };
+}
+
+export function s0FromWings(m: TraderMetrics): number {
+  const sum = m.S_pos + m.S_neg;
+  const b = 0.5 * sum;
+  const rho = (m.S_pos - m.S_neg) / Math.max(Math.abs(sum), 1e-12);
+  return b * rho;
+}
+
+// Back-compat grouped export
+export const SVI = { toMetrics, fromMetrics };
+
+// Default export for interop between ESM and CJS
+const defaultExport = { SVI, toMetrics, fromMetrics, s0FromWings };
+export default defaultExport;

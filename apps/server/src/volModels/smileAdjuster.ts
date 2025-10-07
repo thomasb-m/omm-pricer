@@ -47,36 +47,30 @@ export class SmileAdjuster {
       
       switch (bucket) {
         case 'atm':
-          // ATM inventory mainly affects level and curvature
-          deltaL0 += edgeTicks * 0.001;  // 1 tick = 0.1% vol
+          deltaL0 += edgeTicks * 0.001;
           deltaC0 += Math.sign(inv.vega) * edgeTicks * 0.0002;
           break;
           
         case 'rr25':
-          // 25-delta affects skew and wings
           if (inv.vega < 0) {
-            // Short 25d puts
-            deltaS0 += edgeTicks * 0.0003;   // Increase skew (puts richer)
-            deltaSNeg += -edgeTicks * 0.0002; // Lower left wing
-            deltaL0 += edgeTicks * 0.0002;    // Small ATM lift
+            deltaS0 += edgeTicks * 0.0003;
+            deltaSNeg += -edgeTicks * 0.0002;
+            deltaL0 += edgeTicks * 0.0002;
           } else {
-            // Long 25d puts  
-            deltaS0 -= edgeTicks * 0.0003;    // Decrease skew
-            deltaSNeg -= -edgeTicks * 0.0002; // Raise left wing
+            deltaS0 -= edgeTicks * 0.0003;
+            deltaSNeg -= -edgeTicks * 0.0002;
             deltaL0 -= edgeTicks * 0.0002;
           }
           
-          // 25d calls would affect right wing
           if (inv.vega < 0 && bucket.includes('call')) {
             deltaSPos += -edgeTicks * 0.0002;
           }
           break;
           
         case 'rr10':
-          // 10-delta primarily affects wings
           if (inv.vega < 0) {
             deltaSNeg += -edgeTicks * 0.0003;
-            deltaS0 += edgeTicks * 0.0002;  // Some skew impact
+            deltaS0 += edgeTicks * 0.0002;
           } else {
             deltaSNeg -= -edgeTicks * 0.0003;
             deltaS0 -= edgeTicks * 0.0002;
@@ -84,10 +78,8 @@ export class SmileAdjuster {
           break;
           
         case 'wings':
-          // Far wings - mostly wing slopes
           if (inv.vega < 0) {
             deltaSNeg += -edgeTicks * 0.0004;
-            // Very small propagation to skew
             deltaS0 += edgeTicks * 0.0001;
           }
           break;
@@ -111,13 +103,9 @@ export class SmileAdjuster {
     inventory: Map<string, { vega: number; count: number }>,
     config: ModelConfig
   ): SVIParams {
-    // Get current metrics
     const baseMetrics = SVI.toMetrics(baseCC);
-    
-    // Calculate adjustments
     const impact = this.calculateSmileImpact(inventory, config);
     
-    // Apply adjustments
     const adjustedMetrics: TraderMetrics = {
       L0: baseMetrics.L0 + impact.deltaL0,
       S0: baseMetrics.S0 + impact.deltaS0,
@@ -126,7 +114,6 @@ export class SmileAdjuster {
       S_pos: baseMetrics.S_pos + impact.deltaSPos
     };
     
-    // Convert back to SVI with safety checks
     const sviConfig = {
       bMin: config.svi.bMin,
       sigmaMin: config.svi.sigmaMin,
@@ -144,7 +131,6 @@ export class SmileAdjuster {
     
     const adjustedSVI = SVI.fromMetrics(adjustedMetrics, sviConfig);
     
-    // Validate and return
     if (SVI.validate(adjustedSVI, sviConfig)) {
       return adjustedSVI;
     } else {
@@ -167,13 +153,13 @@ export class SmileAdjuster {
     console.log('-'.repeat(50));
     
     const strikes = [
-      spot * 0.80,  // Far OTM put
-      spot * 0.90,  // 10d put
-      spot * 0.95,  // 25d put  
-      spot * 1.00,  // ATM
-      spot * 1.05,  // 25d call
-      spot * 1.10,  // 10d call
-      spot * 1.20   // Far OTM call
+      spot * 0.80,
+      spot * 0.90,
+      spot * 0.95,
+      spot * 1.00,
+      spot * 1.05,
+      spot * 1.10,
+      spot * 1.20
     ];
     
     for (const strike of strikes) {
@@ -186,8 +172,7 @@ export class SmileAdjuster {
       const pcVol = Math.sqrt(pcVar / T) * 100;
       const diff = pcVol - ccVol;
       
-      // Estimate delta (rough)
-      const delta = 50 * Math.exp(-2 * k * k);  // Approximation
+      const delta = 50 * Math.exp(-2 * k * k);
       
       console.log(
         `${strike.toFixed(0).padStart(6)} | ` +
@@ -200,18 +185,17 @@ export class SmileAdjuster {
   }
 }
 
-
+function testSmileAdjuster() {
+  const config = getDefaultConfig();
   
-  // Create base CC
   const baseMetrics: TraderMetrics = {
-    L0: 0.04,     // 20% vol for 3M
-    S0: -0.001,   // Slight put skew
+    L0: 0.04,
+    S0: -0.001,
     C0: 0.5,
     S_neg: -0.8,
     S_pos: 0.9
   };
   
-  // Convert to SVI config format
   const sviConfig = {
     bMin: config.svi.bMin,
     sigmaMin: config.svi.sigmaMin,
@@ -229,13 +213,11 @@ export class SmileAdjuster {
   
   const baseCC = SVI.fromMetrics(baseMetrics, sviConfig);
   
-  // Simulate inventory: short 100 vega in 25d puts
   const inventory = new Map<string, { vega: number; count: number }>();
   inventory.set('rr25', { vega: -100, count: 1 });
   
   console.log('Inventory: SHORT 100 vega in 25-delta puts\n');
   
-  // Calculate impact
   const impact = SmileAdjuster.calculateSmileImpact(inventory, config);
   
   console.log('Expected smile adjustments:');
@@ -245,10 +227,8 @@ export class SmileAdjuster {
   console.log(`  ΔS_neg (Left wing): ${(impact.deltaSNeg * 100).toFixed(3)}% vol/unit`);
   console.log(`  ΔS_pos (Right wing):${(impact.deltaSPos * 100).toFixed(3)}% vol/unit`);
   
-  // Apply adjustments
   const adjustedPC = SmileAdjuster.adjustSVIForInventory(baseCC, inventory, config);
   
-  // Compare smiles
   SmileAdjuster.compareSmiles(baseCC, adjustedPC, 100, 0.25);
   
   console.log('\nInterpretation:');
@@ -260,7 +240,6 @@ export class SmileAdjuster {
   console.log('\n' + '='.repeat(60));
 }
 
-// Run test if executed directly
 if (require.main === module) {
   testSmileAdjuster();
 }

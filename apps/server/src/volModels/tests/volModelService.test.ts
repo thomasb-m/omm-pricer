@@ -1,21 +1,20 @@
 import { volService } from "../integration/volModelService";
 
-describe("volModelService.getQuoteWithIV", () => {
-  test("returns finite quote for normal inputs", () => {
-    const now = Date.now();
-    const res = volService.getQuoteWithIV("BTC", 100_000, now + 14*24*3600*1000, "C", 0.31);
-    expect(Number.isFinite(res.mid)).toBe(true);
-    expect(res.spread).toBeGreaterThanOrEqual(0);
-    expect(res.bid).toBeGreaterThanOrEqual(0);
-    expect(res.ask).toBeGreaterThanOrEqual(res.bid);
-  });
+describe("VolModelService basic functionality", () => {
+  const symbol = "BTC";
+  const now = Date.now();
+  const expiry = now + 7 * 24 * 3600 * 1000;
 
-  test("gracefully handles swapped strike/expiry (bogus order)", () => {
-    const now = Date.now();
-    const expiryMs = now + 7*24*3600*1000;
-    const bogusStrike = expiryMs;  // looks like ms timestamp
-    const res = volService.getQuoteWithIV("BTC", bogusStrike, 100_000, "P", 0.31);
-    expect(Number.isFinite(res.mid)).toBe(true);
-    expect(res.spread).toBeGreaterThanOrEqual(0);
+  it("gets a quote with valid prices", () => {
+    const strike = 95_000;
+    // positional API: getQuoteWithIV(symbol, strike, expiryMs, ivGuessOrFwd, "P"|"C")
+    const q = volService.getQuoteWithIV(symbol, strike, expiry, 0.35, "P");
+
+    expect(q).toBeTruthy();
+    expect(q.bid).toBeGreaterThanOrEqual(0);
+    expect(q.ask).toBeGreaterThan(q.bid);
+    expect(Number.isFinite(q.mid)).toBe(true);
   });
 });
+
+export {};

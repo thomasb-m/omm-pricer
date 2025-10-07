@@ -14,7 +14,7 @@ const ensureMs = (expiryOrYears?: number) =>
     ? Math.floor(expiryOrYears)
     : Math.floor(Date.now() + (expiryOrYears ?? 0.08) * YEAR_MS);
 
-async function main() {
+export async function startServer() {
   console.log(`[server] PORT=${process.env.PORT} NETWORK=${process.env.DERIBIT_NETWORK} MOCK=${process.env.MOCK_MODE}`);
 
   if (!process.env.MOCK_MODE) {
@@ -24,6 +24,7 @@ async function main() {
 
   const app = Fastify({ logger: true });
   await app.register(cors, { origin: true });
+
 
   const prisma = new PrismaClient();
 
@@ -53,6 +54,26 @@ async function main() {
       total: realized + port.totals.unrealized,
       totals: port.totals,
       legs: port.legs
+    };
+  });
+
+  app.get("/pnl/summary", async () => {
+    const file = "data/trades.jsonl";
+    if (!require("fs").existsSync(file)) {
+      return { count: 0, totalEdge: 0, avgEdge: 0 };
+    }
+    const lines = require("fs").readFileSync(file, "utf8").trim().split("\n");
+    let totalEdge = 0;
+    for (const ln of lines) {
+      try {
+        const r = JSON.parse(ln);
+        totalEdge += r.pnl_est ?? 0;
+      } catch {}
+    }
+    return {
+      count: lines.length,
+      totalEdge: parseFloat(totalEdge.toFixed(2)),
+      avgEdge: lines.length ? parseFloat((totalEdge / lines.length).toFixed(4)) : 0
     };
   });
 
@@ -281,7 +302,9 @@ async function main() {
   console.log(`server up http://localhost:${port}`);
 }
 
-main().catch((err) => {
-  console.error("FATAL:", err);
-  process.exit(1);
-});
+if (typeof require !== "undefined" && require.main === module) {
+  startServer().catch((err) => {
+    console.error("FATAL:", err);
+    process.exit(1);
+  });
+}

@@ -17,7 +17,14 @@ type SymbolState = {
 
 const YEAR_MS = 365.25 * 24 * 3600 * 1000;
 const DEFAULT_FORWARDS: Record<string, number> = { BTC: 45000, ETH: 3000 };
-const DEFAULT_LAMBDA: FactorVec = [0.50, 0.20, 0.10, 0.15, 0.10, 0.30];
+const DEFAULT_LAMBDA: FactorVec = [
+  0.00001,   // L0 - scale way down
+  0.00002,   // S0
+  0.0001,    // C0  
+  0.00005,   // S_neg
+  0.00002,   // S_pos
+  0.000001   // F
+];
 
 function nowMs() { return Date.now(); }
 function ensureMs(expiryOrYears: number): number {
@@ -25,7 +32,20 @@ function ensureMs(expiryOrYears: number): number {
     ? Math.floor(expiryOrYears)
     : Math.floor(nowMs() + Math.max(expiryOrYears, 0) * YEAR_MS);
 }
-
+const FACTOR_CFG = {
+  bMin: 1e-6,
+  sigmaMin: 1e-6,
+  rhoMax: 0.999,
+  sMax: 5,
+  c0Min: 0.01,
+  buckets: [],
+  edgeParams: new Map(),
+  rbfWidth: 0,
+  ridgeLambda: 0,
+  maxL0Move: 0,
+  maxS0Move: 0,
+  maxC0Move: 0
+};
 class VolModelService {
   private symbols = new Map<string, SymbolState>();
 
@@ -94,7 +114,7 @@ class VolModelService {
       if (cc) {
         const T = Math.max(timeToExpiryYears(expiryMs), 1e-8);
         const isCall = optionType === "C";
-        const g = factorGreeksFiniteDiff(cc, strike, T, s.forward, isCall);
+        const g = factorGreeksFiniteDiff(cc, strike, T, s.forward, isCall, FACTOR_CFG);
         ladg = dot(s.lambda, g);
         adjPcMid = (q.pcMid ?? rawMid) + (Number.isFinite(ladg) ? ladg : 0);
         bid = Math.max(0, adjPcMid - half);
@@ -163,7 +183,7 @@ try {
     console.log(`[volService] Computing factor greeks: K=${strike}, T=${timeToExpiryYears(expiryMs, t)}, F=${s.forward}, optionType=${optionType}`);
     const T = Math.max(timeToExpiryYears(expiryMs, t), 1e-8);
     const isCall = optionType === "C";
-    const g = factorGreeksFiniteDiff(cc, strike, T, s.forward, isCall);
+    const g = factorGreeksFiniteDiff(cc, strike, T, s.forward, isCall, FACTOR_CFG);
     console.log(`[volService] Factor greeks: g=[${g.map(x => x.toFixed(6)).join(', ')}]`);
     console.log(`[volService] I_old=[${s.inventory.map(x => x.toFixed(2)).join(', ')}]`);
     s.inventory = axpy(s.inventory, signedSize, g);
@@ -193,6 +213,15 @@ try {
   getInventory(symbol: string) {
     const s = this.ensure(symbol);
     return s.model.getInventorySummary();
+  }
+  
+  getFactorInventory(symbol: string) {
+    const s = this.ensure(symbol);
+    return {
+      inventory: s.inventory,
+      lambda: s.lambda,
+      lambdaDotInventory: dot(s.lambda, s.inventory)
+    };
   }
 }
 

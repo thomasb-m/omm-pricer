@@ -154,6 +154,20 @@ export class QuoteEngine {
   getInventory(symbol: string) {
     return volService.getInventory(symbol);
   }
+
+  getFactorInventory(symbol: string) {
+    return volService.getFactorInventory(symbol);
+  }
+
+  resetAllState(): void {
+    volService.clearInventory("BTC");
+    volService.clearInventory("ETH");
+    // Force the model to reset surfaces
+    const btcModel = (volService as any).symbols?.get?.("BTC")?.model;
+    const ethModel = (volService as any).symbols?.get?.("ETH")?.model;
+    if (btcModel?.resetAllState) btcModel.resetAllState();
+    if (ethModel?.resetAllState) ethModel.resetAllState();
+  }
 }
 
 export const quoteEngine = new QuoteEngine();
@@ -165,7 +179,7 @@ export async function initializeWithMarketData(prisma: PrismaClient) {
   });
 
   const btcForward =
-    btcPerp?.markPrice ?? btcPerp?.lastPrice ?? 45000;
+    btcPerp?.markPrice ?? 45000;
 
   console.log(`Initializing BTC with forward: ${btcForward}`);
   quoteEngine.updateForward("BTC", btcForward);

@@ -1,6 +1,6 @@
 import { PrismaClient } from "@prisma/client";
 import { quoteEngine } from "../quoteEngine";
-import { VolModelService } from "../services/volModelService";
+import { volService } from "../volModels/integration/volModelService";
 import { TradeLog } from "../logging/tradeLog";
 
 
@@ -55,12 +55,13 @@ type TickContext = {
 };
 
 function strikeGrid(F: number): number[] {
-  const low = Math.floor(F * 0.9 / 100) * 100;
-  const high = Math.ceil(F * 1.1 / 100) * 100;
+  const low = Math.floor(F * 0.97 / 1000) * 1000;
+  const high = Math.ceil(F * 1.03 / 1000) * 1000;
   const strikes: number[] = [];
-  for (let k = low; k <= high; k += 100) strikes.push(k);
+  for (let k = low; k <= high; k += 1000) strikes.push(k);
   return strikes;
 }
+
 
 function tradeEdgeUSD(side: Side, ccMid: number, bid: number, ask: number): number {
   return side === "SELL" ? ask - ccMid : ccMid - bid;
@@ -106,6 +107,12 @@ export class Backtester {
     endTime: number,
     optionType: OptionType = "P"
   ): Promise<{ strategy: string; summary: BacktestResult }> {
+    // Seed deterministic test data
+    const { seedTestData } = await import("./testDataSeed");
+    await seedTestData(this.prisma);
+    // Clear vol service state for determinism
+    const { quoteEngine } = await import("../quoteEngine");
+    quoteEngine.resetAllState();
     const beats = await this.prisma.ticker.findMany({
       where: { instrument: "BTC-PERPETUAL", tsMs: { gte: BigInt(startTime), lte: BigInt(endTime) } },
       orderBy: { tsMs: "asc" },
@@ -153,17 +160,45 @@ export class Backtester {
         inv.avgPrice = (inv.avgPrice * Math.abs(inv.qty) + (side === "SELL" ? q.ask : q.bid) * size) / (Math.abs(inv.qty) + size);
         inventory[strike] = inv;
     
+        const tradePx = side === "SELL" ? q.ask : q.bid;
+        
+        // Get factor inventory before trade
+        const factorsBefore = quoteEngine.getFactorInventory(symbol);
+        
         byTrade.push({ 
           ts, strike, expiryMs, side, optionType, 
-          price: side === "SELL" ? q.ask : q.bid, 
+          price: tradePx, 
           ccMid, edgeUSD: edge, bucket: q.bucket 
         });
         
+        // Execute trade
         quoteEngine.executeTrade({ 
           symbol, strike, expiryMs, optionType, side, size, 
-          price: side === "SELL" ? q.ask : q.bid, 
+          price: tradePx, 
           timestamp: ts,
-          marketIV: atmIV  // Pass through for proper surface calibration
+          marketIV: atmIV
+        });
+        
+        /// Get factor inventory after trade
+        const factorsAfter = quoteEngine.getFactorInventory(symbol);
+        
+        // Log trade with factor attribution
+        TradeLog.write({
+          ts,
+          symbol,
+          F,
+          K: strike,
+          expiryMs,
+          side,
+          qty: size,
+          ccMid,
+          pcMid: q.pcMid ?? q.mid,
+          tradePx,
+          dotLamG: factorsAfter.lambdaDotInventory,
+          I_before: factorsBefore.inventory,
+          I_after: factorsAfter.inventory,
+          lambda: factorsAfter.lambda,
+          pnl_est: edge * size
         });
       }
     }
