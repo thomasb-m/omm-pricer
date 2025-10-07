@@ -2,17 +2,18 @@
 /**
  * Factor Registry - Central definition of all risk factors
  * 
- * Matches the existing FactorSpace model:
- * [L0, S0, C0, Sneg, Spos, F]
+ * Version 2: Added Gamma factor
+ * Order: [F, Gamma, L0, S0, C0, Sneg, Spos]
  */
 
 export type FactorLabel =
-  | "L0"      // Level (ATM vol)
-  | "S0"      // Skew
-  | "C0"      // Curvature
-  | "Sneg"    // Left wing
-  | "Spos"    // Right wing
-  | "F"       // Forward
+  | "F"           // Forward/Delta
+  | "Gamma"       // Convexity
+  | "L0"          // Level (ATM vol)
+  | "S0"          // Skew
+  | "C0"          // Curvature
+  | "Sneg"        // Left wing
+  | "Spos"        // Right wing
   ;
 
 export type FactorSpec = {
@@ -30,8 +31,18 @@ export type FactorRegistry = {
 
 // SINGLE SOURCE OF TRUTH
 export const FACTORS: FactorRegistry = {
-  version: 1,
+  version: 2,  // ← Bumped from 1 to 2
   specs: [
+    {
+      label: "F",
+      unit: "$/Δ",
+      description: "Forward price sensitivity (delta-like)",
+    },
+    {
+      label: "Gamma",
+      unit: "$/Γ",
+      description: "Convexity exposure to underlying moves",
+    },
     {
       label: "L0",
       unit: "$/L0",
@@ -56,11 +67,6 @@ export const FACTORS: FactorRegistry = {
       label: "Spos",
       unit: "$/Spos",
       description: "Right wing sensitivity",
-    },
-    {
-      label: "F",
-      unit: "$/F",
-      description: "Forward price sensitivity (delta-like)",
     },
   ],
 };

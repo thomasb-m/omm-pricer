@@ -2,8 +2,8 @@
 /**
  * Bridge between existing FactorSpace and new factor registry system
  * 
- * Your existing finiteDiffGreeks already computes the 6 factors we need,
- * so this is just a thin wrapper that adds metadata.
+ * Version 2: Now returns 7 factors [F, Gamma, L0, S0, C0, Sneg, Spos]
+ * Gamma is computed via finite-diff on F (second derivative)
  */
 
 import { FACTORS, d, FACTOR_LABELS, FactorVector } from './factors';
@@ -11,7 +11,8 @@ import {
   finiteDiffGreeks, 
   PriceFn, 
   Theta,
-  defaultEpsilons 
+  defaultEpsilons,
+  cloneTheta
 } from './FactorSpace';
 
 // Export your existing types so other modules can use them
@@ -19,33 +20,60 @@ export type { Theta, PriceFn } from './FactorSpace';
 
 /**
  * Your instrument type - adjust if needed
- * (Look in your codebase for the actual Instrument interface)
  */
 export type Instrument = {
   symbol: string;
   strike: number;
   expiryMs: number;
   isCall: boolean;
-  // Add other fields your instrument has
 };
 
 /**
  * Market context wraps the theta vector
  */
 export type MarketContext = {
-  theta: Theta;  // [L0, S0, C0, Sneg, Spos, F]
-  // Add other market data you need (rates, etc.)
+  theta: Theta;  // [L0, S0, C0, Sneg, Spos, F] (from FactorSpace)
 };
 
 /**
- * Compute factor greeks using your existing finite-diff method
- * Returns raw array: [L0, S0, C0, Sneg, Spos, F]
+ * Compute Gamma via finite difference on F (second derivative)
+ * Gamma = d²P/dF² ≈ (P(F+h) - 2P(F) + P(F-h)) / h²
+ */
+function computeGamma(
+  priceFn: PriceFn<Instrument>,
+  theta: Theta,
+  inst: Instrument,
+  h: number = 10  // Bump size in underlying price units (e.g., $10 for BTC)
+): number {
+  // F is at index 5 in your FactorSpace theta
+  const thetaPlus = cloneTheta(theta);
+  const thetaMinus = cloneTheta(theta);
+  const thetaBase = theta;
+  
+  thetaPlus[5] += h;
+  thetaMinus[5] -= h;
+  
+  const pPlus = priceFn(thetaPlus, inst);
+  const pBase = priceFn(thetaBase, inst);
+  const pMinus = priceFn(thetaMinus, inst);
+  
+  // Second derivative
+  const gamma = (pPlus - 2 * pBase + pMinus) / (h * h);
+  
+  return isFinite(gamma) ? gamma : 0;
+}
+
+/**
+ * Compute factor greeks: [F, Gamma, L0, S0, C0, Sneg, Spos]
+ * 
+ * Your FactorSpace returns: [L0, S0, C0, Sneg, Spos, F]
+ * We reorder and add Gamma to match the new registry
  * 
  * @param instr - Option instrument
  * @param ctx - Market context containing theta
  * @param priceFn - Your pricing function
  * @param eps - Optional bump sizes (defaults to defaultEpsilons)
- * @returns Factor greeks in registry order
+ * @returns Factor greeks in registry order [F, Gamma, L0, S0, C0, Sneg, Spos]
  */
 export function factorGreeksFor(
   instr: Instrument,
@@ -53,8 +81,23 @@ export function factorGreeksFor(
   priceFn: PriceFn<Instrument>,
   eps?: Theta
 ): number[] {
-  // Your existing function already returns the correct order!
-  return finiteDiffGreeks(priceFn, ctx.theta, instr, eps);
+  // Get the 6 base factors from your existing FactorSpace
+  // Returns: [L0, S0, C0, Sneg, Spos, F]
+  const baseGreeks = finiteDiffGreeks(priceFn, ctx.theta, instr, eps);
+  
+  // Compute Gamma separately (not in FactorSpace)
+  const gamma = computeGamma(priceFn, ctx.theta, instr);
+  
+  // Reorder to match new registry: [F, Gamma, L0, S0, C0, Sneg, Spos]
+  return [
+    baseGreeks[5],  // F (was at index 5)
+    gamma,          // Gamma (new, computed above)
+    baseGreeks[0],  // L0 (was at index 0)
+    baseGreeks[1],  // S0 (was at index 1)
+    baseGreeks[2],  // C0 (was at index 2)
+    baseGreeks[3],  // Sneg (was at index 3)
+    baseGreeks[4],  // Spos (was at index 4)
+  ];
 }
 
 /**
