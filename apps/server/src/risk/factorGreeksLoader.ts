@@ -76,30 +76,48 @@ function computeGamma(
  * @returns Factor greeks in registry order [F, Gamma, L0, S0, C0, Sneg, Spos]
  */
 export function factorGreeksFor(
-  instr: Instrument,
-  ctx: MarketContext,
-  priceFn: PriceFn<Instrument>,
-  eps?: Theta
-): number[] {
-  // Get the 6 base factors from your existing FactorSpace
-  // Returns: [L0, S0, C0, Sneg, Spos, F]
-  const baseGreeks = finiteDiffGreeks(priceFn, ctx.theta, instr, eps);
-  
-  // Compute Gamma separately (not in FactorSpace)
-  const gamma = computeGamma(priceFn, ctx.theta, instr);
-  
-  // Reorder to match new registry: [F, Gamma, L0, S0, C0, Sneg, Spos]
-  return [
-    baseGreeks[5],  // F (was at index 5)
-    gamma,          // Gamma (new, computed above)
-    baseGreeks[0],  // L0 (was at index 0)
-    baseGreeks[1],  // S0 (was at index 1)
-    baseGreeks[2],  // C0 (was at index 2)
-    baseGreeks[3],  // Sneg (was at index 3)
-    baseGreeks[4],  // Spos (was at index 4)
-  ];
-}
-
+    instr: Instrument,
+    ctx: MarketContext,
+    priceFn: PriceFn<Instrument>,
+    eps?: Theta
+  ): number[] {
+    // Get base greeks from FactorSpace
+    const baseGreeks = finiteDiffGreeks(priceFn, ctx.theta, instr, eps);
+    const gamma = computeGamma(priceFn, ctx.theta, instr);
+    
+    // Get current price for normalization
+    const basePrice = priceFn(ctx.theta, instr);
+    
+    // Normalize greeks: express as "fraction of contract value per factor unit"
+    // This makes them comparable across strikes and maturities
+    const normalize = (g: number) => {
+      return basePrice > 0 ? g / basePrice : 0;
+    };
+    
+    // Reorder to registry and normalize
+    const raw = [
+      baseGreeks[5],  // F
+      gamma,          // Gamma
+      baseGreeks[0],  // L0
+      baseGreeks[1],  // S0
+      baseGreeks[2],  // C0
+      baseGreeks[3],  // Sneg
+      baseGreeks[4],  // Spos
+    ];
+    
+    // Additional scaling for each factor type
+    const typeScales = [
+        1.0,     // F
+        0.0001,  // Gamma
+        0.001,   // L0
+        0.01,    // S0 ← 10x smaller (was 0.1, now 0.01)
+        0.1,     // C0
+        0.1,     // Sneg
+        0.1,     // Spos
+      ];
+    
+    return raw.map((g, i) => normalize(g) * typeScales[i]);
+  }
 /**
  * Get factor greeks with metadata (for logging to DB)
  */

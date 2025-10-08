@@ -14,26 +14,45 @@ const ensureMs = (expiryOrYears?: number) =>
     ? Math.floor(expiryOrYears)
     : Math.floor(Date.now() + (expiryOrYears ?? 0.08) * YEAR_MS);
 
-export async function startServer() {
-  console.log(`[server] PORT=${process.env.PORT} NETWORK=${process.env.DERIBIT_NETWORK} MOCK=${process.env.MOCK_MODE}`);
-
-  if (!process.env.MOCK_MODE) {
-    process.env.MOCK_MODE = "1";
-    console.log("[server] Enabling MOCK_MODE for testing");
-  }
-
-  const app = Fastify({ logger: true });
-  await app.register(cors, { origin: true });
-
-
-  const prisma = new PrismaClient();
-
-  console.log("[server] Starting ingest process...");
-  startIngest(prisma).catch(err => console.error("INGEST ERROR:", err));
-
-  const recorder = new MarketRecorder(prisma);
-  await initializeWithMarketData(prisma);
-  recorder.startRecording("BTC", 60000);
+    export async function startServer() {
+      console.log(`[server] PORT=${process.env.PORT} NETWORK=${process.env.DERIBIT_NETWORK} MOCK=${process.env.MOCK_MODE}`);
+    
+      if (!process.env.MOCK_MODE) {
+        process.env.MOCK_MODE = "1";
+        console.log("[server] Enabling MOCK_MODE for testing");
+      }
+    
+      const app = Fastify({ logger: false }); // Less noise
+      await app.register(cors, { origin: true });
+    
+      const prisma = new PrismaClient();
+    
+      // Connect to database first
+      try {
+        await prisma.$connect();
+        console.log("[server] ✅ Database connected");
+      } catch (err) {
+        console.error("[server] ❌ Database connection failed:", err);
+        process.exit(1);
+      }
+    
+      console.log("[server] Starting ingest process...");
+      startIngest(prisma).catch(err => console.error("INGEST ERROR:", err));
+    
+      console.log("[server] Initializing quote engine...");
+      try {
+        await initializeWithMarketData(prisma);
+        console.log("[server] ✅ Quote engine initialized");
+      } catch (err) {
+        console.error("FATAL: Quote engine init failed:", err);
+        if (process.env.MOCK_MODE !== "1") {
+          process.exit(1);
+        }
+        console.log("[server] ⚠️  Continuing in MOCK mode");
+      }
+    
+      const recorder = new MarketRecorder(prisma);
+      recorder.startRecording("BTC", 60000);
 
   // ------------------------
   // Health

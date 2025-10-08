@@ -2,14 +2,12 @@
 /**
  * End-to-End Demo: Complete integration test
  * 
- * This demonstrates the full flow:
- * 1. Market data ticks (SimAdapter)
- * 2. Factor greeks computation (your FactorSpace)
- * 3. Covariance updates (SigmaService)
- * 4. Risk calculations (FactorRisk)
- * 5. Quote generation
- * 6. Fill simulation
- * 7. Inventory updates
+ * Now with feature flags and explainability!
+ * 
+ * Usage:
+ *   npx ts-node src/demo.ts                    # Default (week1-baseline)
+ *   npx ts-node src/demo.ts --config=debug     # Debug mode
+ *   npx ts-node src/demo.ts --config=minimal   # Minimal (isolate)
  */
 
 import { SigmaService } from './risk/SigmaService';
@@ -18,49 +16,20 @@ import { factorGreeksFor, Instrument, MarketContext } from './risk/factorGreeksL
 import { SimAdapter } from './exchange/SimAdapter';
 import { d, FACTOR_LABELS } from './risk/factors';
 import { Theta, PriceFn } from './risk/FactorSpace';
+import { loadConfigFromArgs } from './config/featureFlags';
+import { QuoteExplainer } from './engine/QuoteExplainer';
+import { DebugAPI } from './api/DebugAPI';
 
 // ============================================================================
-// Configuration
+// Configuration (from command line or default)
 // ============================================================================
 
-const CONFIG = {
-  // Risk parameters (conservative for Week 1 Day 1-5)
-  risk: {
-    gamma: 1.0,
-    z: 0.0,      // No model spread yet
-    eta: 0.0,    // No microstructure spread yet
-    kappa: 0.0,  // No inventory widening yet
-    L: 1.0,
-    ridgeEpsilon: 1e-5,
-    feeBuffer: 0.50,
-    qMax: 10,
-    minEdge: 0.10,
-  },
-  
-  // Sigma parameters
-  sigma: {
-    horizonMs: 1000,
-    alpha: 0.05,
-    ridgeEpsilon: 1e-5,
-    minSamples: 10, // Lower for demo
-  },
-  
-  // Simulation parameters
-  sim: {
-    initialF: 50000,
-    ouMean: 50000,
-    ouTheta: 0.1,
-    ouSigma: 0.02,
-    tickMs: 1000,
-    fillProbBase: 0.15,
-    fillProbSpreadDecay: 0.5,
-    fillProbSizeDecay: 0.3,
-    slippageBps: 1.0,
-  },
-  
-  // How many ticks to run
-  numTicks: 50,
-};
+const CONFIG = loadConfigFromArgs();
+
+console.log(`\n🚀 Running: ${CONFIG.name} (v${CONFIG.version})`);
+console.log(`Features:`, CONFIG.features);
+console.log(`Risk: γ=${CONFIG.risk.gamma}, z=${CONFIG.risk.z}, η=${CONFIG.risk.eta}, κ=${CONFIG.risk.kappa}`);
+console.log('');
 
 // ============================================================================
 // Initialize Services
@@ -72,11 +41,19 @@ const sigmaService = new SigmaService(CONFIG.sigma);
 const factorRisk = new FactorRisk(CONFIG.risk);
 const simAdapter = new SimAdapter(CONFIG.sim, 42);
 
+// Portfolio State (moved up)
+let inventory: number[] = new Array(d).fill(0);
+
+// Now initialize DebugAPI (after inventory exists)
+const debugAPI = new DebugAPI(3000, sigmaService, factorRisk, CONFIG, inventory);
+debugAPI.start().then(() => {
+  console.log('✅ Debug API started\n');
+});
+
 // ============================================================================
 // Portfolio State
 // ============================================================================
 
-let inventory: number[] = new Array(d).fill(0);
 let portfolioValue = 0;
 let realizedPnL = 0;
 let totalFees = 0;
@@ -148,7 +125,10 @@ const priceFn: PriceFn<Instrument> = (theta: Theta, inst: Instrument) => {
   
   const callPrice = F * norm(d1) - K * norm(d2);
   
-  return Math.max(0, callPrice);
+  // Add 0.5% edge for market making
+  const edge = callPrice * 0.01;
+  
+  return Math.max(0, callPrice + edge);
 };
 
 // ============================================================================
@@ -156,10 +136,10 @@ const priceFn: PriceFn<Instrument> = (theta: Theta, inst: Instrument) => {
 // ============================================================================
 
 function computePortfolioFactors(theta: Theta): number[] {
-  // This should aggregate factors across all positions
-  // For now, just return current inventory
-  return [...inventory];
-}
+    // Return current inventory as portfolio factors
+    // These are already scaled properly from factorGreeksFor()
+    return [...inventory];
+  }
 
 // ============================================================================
 // Main Loop
@@ -223,6 +203,9 @@ for (let tick = 0; tick < CONFIG.numTicks; tick++) {
   }> = [];
   
   for (const inst of instruments) {
+    if (tick === 15) {
+        console.log(`\n🔍 DEBUG: tick=${tick}, inst.symbol=${inst.symbol}, instruments[0].symbol=${instruments[0].symbol}, match=${inst === instruments[0]}`);
+      }
     // Compute theoretical value
     const theo = priceFn(marketCtx.theta, inst);
     
@@ -233,7 +216,68 @@ for (let tick = 0; tick < CONFIG.numTicks; tick++) {
     const sigmaMD = 0.002;
     
     // Compute quote params
-    const quoteParams = factorRisk.computeQuote(g, theo, sigmaMD, theo);
+    // Simulate market mid slightly different from theo
+    const marketMid = theo / 1.01;  // Remove the 1% edge to get market mid
+    const quoteParams = factorRisk.computeQuote(g, theo, sigmaMD, marketMid);
+    if (tick === 15 || tick === 16 || tick === 17) {
+        console.log(`\n🔍 [Tick ${tick}] ${inst.symbol} RAW VALUES:`);
+        console.log('  spreadComponents:', quoteParams.spreadComponents);
+        console.log('  gLambdaG:', quoteParams.gLambdaG);
+      }
+    
+   // FORCE explanation at tick 15 
+   if (tick === 15 && inst === instruments[0]) {
+    console.log('\n🔍 FORCING EXPLANATION...\n');
+    
+    // ADD THESE LINES HERE:
+    console.log('🔍 RAW SPREAD COMPONENTS:');
+    console.log('  fee:', quoteParams.spreadComponents.fee);
+    console.log('  model:', quoteParams.spreadComponents.model);
+    console.log('  noise:', quoteParams.spreadComponents.noise);
+    console.log('  inventory:', quoteParams.spreadComponents.inventory);
+    console.log('  total:', quoteParams.spreadComponents.total);
+    console.log('  gLambdaG:', quoteParams.gLambdaG);
+    console.log('  sigmaMD:', sigmaMD);
+    console.log('  z:', CONFIG.risk.z);
+    console.log('  eta:', CONFIG.risk.eta);
+    console.log('');
+    
+    const explanation = QuoteExplainer.explain(
+      inst.symbol,
+      theo,
+      marketMid,
+      quoteParams,
+      CONFIG.risk.minEdge,
+      {
+        useModelSpread: CONFIG.features.useModelSpread,
+        useMicrostructure: CONFIG.features.useMicrostructure,
+        useInventoryWidening: CONFIG.features.useInventoryWidening,
+        useInventorySkew: CONFIG.features.useInventorySkew,
+      }
+    );
+    
+    console.log(QuoteExplainer.formatForConsole(explanation, true));
+  }
+
+    // Explain decision if enabled (show more often in debug mode)
+    if (CONFIG.features.explainDecisions && inst === instruments[0] && (tick === 15 || tick === 18)) {      const explanation = QuoteExplainer.explain(
+        inst.symbol,
+        theo,
+        marketMid,
+        quoteParams,
+        CONFIG.risk.minEdge,
+        {
+          useModelSpread: CONFIG.features.useModelSpread,
+          useMicrostructure: CONFIG.features.useMicrostructure,
+          useInventoryWidening: CONFIG.features.useInventoryWidening,
+          useInventorySkew: CONFIG.features.useInventorySkew,
+        }
+      );
+      
+      console.log(QuoteExplainer.formatForConsole(explanation, true));
+      // Record quote in API
+      debugAPI.recordQuote(inst.symbol, explanation);
+    }
     
     quotes.push({
       symbol: inst.symbol,
@@ -245,7 +289,7 @@ for (let tick = 0; tick < CONFIG.numTicks; tick++) {
       skew: quoteParams.skew,
       g,
     });
-  }
+  }  // ← This closes the "for (const inst of instruments)" loop
   
   // ==========================================================================
   // 5. Try to Fill
@@ -259,7 +303,8 @@ for (let tick = 0; tick < CONFIG.numTicks; tick++) {
     sizeAsk: q.sizeAsk,
   }));
   
-  const fills = simAdapter.tryFill(simQuotes);
+    const fills = simAdapter.tryFill(simQuotes);
+  // const fills: any[] = [];  // ← Remove this line
   
   // ==========================================================================
   // 6. Process Fills & Update Inventory
@@ -282,8 +327,20 @@ for (let tick = 0; tick < CONFIG.numTicks; tick++) {
     totalFees += CONFIG.risk.feeBuffer * fill.qty;
     
     console.log(`  💰 FILL: ${fill.side.toUpperCase()} ${fill.qty} ${fill.symbol} @ ${fill.price.toFixed(2)} | Edge: $${edge.toFixed(2)}`);
+    // Record trade in API
+    debugAPI.recordTrade({
+        timestamp: Date.now(),
+        symbol: fill.symbol,
+        side: fill.side,
+        qty: fill.qty,
+        price: fill.price,
+        edge: edge,
+      });
   }
   
+  // Update inventory in API
+  debugAPI.updateInventory(inventory);
+
   // ==========================================================================
   // 7. Print Status
   // ==========================================================================
@@ -329,3 +386,9 @@ console.log(`  Net PnL:    $${netPnL.toFixed(2)}`);
 console.log(`  Final Inv:  [${inventory.map(x => x.toFixed(2)).join(', ')}]`);
 
 console.log('\n✅ Demo complete! All systems working.\n');
+console.log('💡 Debug API still running on http://localhost:3000');
+console.log('💡 Open dashboard.html in your browser');
+console.log('💡 Press Ctrl+C to stop\n');
+
+// Keep the process alive so API stays running
+process.stdin.resume();

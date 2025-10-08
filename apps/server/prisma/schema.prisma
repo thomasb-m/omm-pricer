@@ -1,5 +1,4 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
+// apps/server/prisma/schema.prisma
 
 generator client {
   provider = "prisma-client-js"
@@ -7,70 +6,275 @@ generator client {
 
 datasource db {
   provider = "sqlite"
-  url      = env("DATABASE_URL")
+  url      = "file:./dev.db"
 }
 
+// ============================================================================
+// Run tracking
+// ============================================================================
+
+model Run {
+  id            String    @id @default(cuid())
+  startedAt     DateTime  @default(now())
+  endedAt       DateTime?
+  configJson    Json      // Full config snapshot
+  configHash    String    // SHA of sorted config keys
+  factorVersion Int       // Factor registry version
+  
+  // Relations
+  quotes        Quote[]
+  trades        Trade[]
+  inventorySnapshots InventorySnapshot[]
+  riskMetrics   RiskMetrics[]
+  events        Event[]
+  
+  @@index([startedAt])
+  @@index([configHash])
+}
+
+// ============================================================================
+// Quotes
+// ============================================================================
+
+model Quote {
+  id        String   @id @default(cuid())
+  runId     String
+  run       Run      @relation(fields: [runId], references: [id])
+  
+  ts        DateTime @default(now())
+  symbol    String
+  expiryMs  BigInt
+  strike    Float
+  
+  // Pricing
+  theoRaw   Float
+  theoInv   Float
+  skew      Float
+  bid       Float
+  ask       Float
+  sizeBid   Float
+  sizeAsk   Float
+  
+  // Market data context
+  mid       Float
+  
+  // Factor greeks: { version, labels, values }
+  gJson     Json
+  
+  // Spread components: { fee, noise, model, inventory, total }
+  spreadJson Json
+  
+  // Diagnostics
+  gLambdaG  Float
+  invUtil   Float    // Inventory utilization
+  
+  // Factor contributions (optional): [(Λg).*g]
+  factorContribJson Json?
+  
+  @@index([runId, ts])
+  @@index([symbol, ts])
+}
+
+// ============================================================================
+// Trades
+// ============================================================================
+
+model Trade {
+  id        String   @id @default(cuid())
+  runId     String
+  run       Run      @relation(fields: [runId], references: [id])
+  
+  ts        DateTime @default(now())
+  symbol    String
+  side      String   // "buy" | "sell"
+  qty       Float
+  price     Float
+  
+  // Market context at fill
+  F         Float    // Underlying price
+  K         Float    // Strike
+  expiryMs  BigInt
+  
+  // Risk at fill
+  gJson     Json     // Factor greeks
+  dotLamG   Float    // λ·g (inventory cost)
+  gLambdaG  Float    // gᵀΛg (quadratic penalty)
+  
+  // PnL attribution
+  pnlEst    Float    // Estimated PnL (edge - cost)
+  edge      Float?   // Theo vs fill price
+  
+  @@index([runId, ts])
+  @@index([symbol, ts])
+}
+
+// ============================================================================
+// Inventory snapshots
+// ============================================================================
+
+model InventorySnapshot {
+  id        String   @id @default(cuid())
+  runId     String
+  run       Run      @relation(fields: [runId], references: [id])
+  
+  ts        DateTime @default(now())
+  symbol    String
+  
+  // Factor inventory: { version, labels, values }
+  IJson     Json
+  
+  // Lambda vector: λ = ΛI
+  lambdaJson Json
+  
+  // Aggregates
+  notional  Float    // Total notional exposure
+  vega      Float    // Net vega
+  gamma     Float    // Net gamma
+  
+  // Risk metrics
+  invNorm   Float    // ||I||_Λ
+  invUtil   Float    // ||I||_Λ / L
+  
+  @@index([runId, ts])
+  @@index([symbol, ts])
+}
+
+// ============================================================================
+// Risk metrics (covariance & parameters)
+// ============================================================================
+
+model RiskMetrics {
+  id        String   @id @default(cuid())
+  runId     String
+  run       Run      @relation(fields: [runId], references: [id])
+  
+  ts        DateTime @default(now())
+  symbol    String
+  
+  // Covariance state
+  horizonMs Int
+  SigmaJson Json     // { version, labels, matrix }
+  
+  // Diagnostics
+  traceValue Float
+  condNumber Float
+  isPD       Boolean
+  minDiag    Float
+  maxDiag    Float
+  samples    Int
+  
+  // Parameters at this snapshot
+  gamma      Float
+  z          Float
+  eta        Float
+  kappa      Float
+  L          Float
+  ridgeEps   Float
+  
+  @@index([runId, ts])
+  @@index([symbol, ts])
+}
+
+// ============================================================================
+// Events (warnings, errors, regime changes)
+// ============================================================================
+
+model Event {
+  id        String   @id @default(cuid())
+  runId     String
+  run       Run      @relation(fields: [runId], references: [id])
+  
+  ts        DateTime @default(now())
+  level     String   // "info" | "warn" | "error"
+  code      String   // e.g. "SIGMA_ILL_CONDITIONED", "INVENTORY_LIMIT"
+  message   String
+  
+  // Optional structured metadata
+  metaJson  Json?
+  
+  @@index([runId, ts])
+  @@index([level, ts])
+  @@index([code])
+}
+// ============================================================================
+// Live Trading Models (for ingest & market data)
+// ============================================================================
+
 model Instrument {
-  id         String   @id
-  name       String   @unique
-  kind       String
-  currency   String
-  strike     Float?
-  optionType String?
-  expiryMs   BigInt?
-  createdAt  DateTime @default(now())
+  id           String   @id
+  name         String
+  kind         String   // "option" | "future" | "perpetual"
+  currency     String
+  strike       Float?
+  optionType   String?  // "call" | "put"
+  expiryMs     BigInt?
+  
+  expirationTimestamp BigInt?
+  instrument   String   @unique
+  
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  
+  @@index([kind])
+  @@index([expiryMs])
 }
 
 model Ticker {
-  id         Int      @id @default(autoincrement())
-  tsMs       BigInt
-  instrument String
-  markIv     Float?
-  markPrice  Float?
-  bestBid    Float?
-  bestAsk    Float?
-  underlying Float?
+  id          String   @id @default(cuid())
+  instrument  String
+  tsMs        BigInt
+  bid         Float?
+  ask         Float?
+  mid         Float?
+  markIV      Float?
+  markPrice   Float?
+  
+  createdAt   DateTime @default(now())
+  
+  @@index([instrument, tsMs])
+  @@index([tsMs])
+}
+
+model BtcIndex {
+  id        String   @id @default(cuid())
+  price     Float
+  timestamp BigInt
+  
+  createdAt DateTime @default(now())
+  
+  @@index([timestamp])
 }
 
 model TickIndex {
-  id        Int      @id @default(autoincrement())
-  tsMs      BigInt
+  id        String   @id @default(cuid())
   indexName String
   price     Float
-}
-
-model Trade {
-  id         BigInt   @id @default(autoincrement())
-  tsMs       BigInt
-  instrument String
-  price      Float
-  size       Float
-  side       String?
-  tradeId    String?  @unique
+  tsMs      BigInt
+  
+  createdAt DateTime @default(now())
+  
+  @@index([indexName, tsMs])
 }
 
 model Position {
-  instrument  String   @id                // instrument_name (or future symbol)
-  qty         Float                         // +long / -short (contracts)
-  avgPrice    Float                         // average entry price in instrument currency
-  updatedAt   DateTime @default(now())
-}
-
-model Fill {
-  id          BigInt   @id @default(autoincrement())
-  tsMs        BigInt
-  instrument  String
-  side        String                // "buy" | "sell"
-  price       Float
-  qty         Float                 // positive number (direction by side)
-  fee         Float?                // optional
+  id         String   @id @default(cuid())
+  instrument String   @unique
+  qty        Float
+  avgPrice   Float
+  
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  
+  @@index([instrument])
 }
 
 model MarketSnapshot {
-  id        Int      @id @default(autoincrement())
-  timestamp BigInt
+  id        String   @id @default(cuid())
   symbol    String
-  data      String   // JSON blob
+  timestamp BigInt
+  data      String   // JSON string
   
-  @@index([timestamp, symbol])
+  createdAt DateTime @default(now())
+  
+  @@index([symbol, timestamp])
 }

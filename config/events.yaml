@@ -1,0 +1,8 @@
+# Event variance masses (total variance ω in vol^2 * time units)
+BTC:
+  - t_event_ms: 1760961600000  # Example: 2 weeks from now
+    omega_event: 0.0008        # ~(20 vol pts over 1 day)^2 * 1d
+
+ETH:
+  - t_event_ms: 1760961600000
+    omega_event: 0.0012

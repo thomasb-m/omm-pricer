@@ -3,7 +3,9 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "workspaces": ["apps/*"],
+  "workspaces": [
+    "apps/*"
+  ],
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -15,7 +17,10 @@
     "context": "Scripts/context.sh",
     "context:lite": "Scripts/context.sh context-pack-lite.txt lite",
     "context:split": "Scripts/context.sh context-pack.txt split",
-    "backtest": "bash apps/server/run-backtest.sh"
+    "backtest": "bash apps/server/run-backtest.sh",
+    "verify": "tsx --tsconfig tsconfig.scripts.json tools/ai/verify.ts",
+    "verify:cjs": "tsc -p tsconfig.verify.json && node -e \"require('fs').writeFileSync('.tmp/verify/package.json','{\\\"type\\\":\\\"commonjs\\\"}\\n')\" && node .tmp/verify/tools/ai/verify.js",
+    "verify:clean": "rm -rf .tmp/verify"
   },
   "dependencies": {
     "@tailwindcss/postcss": "^4.1.13",
@@ -40,6 +45,7 @@
     "postcss": "^8.5.6",
     "tailwindcss": "^4.1.13",
     "ts-jest": "^29.4.4",
+    "tsx": "^4.20.6",
     "vite": "^7.1.2"
   }
 }
