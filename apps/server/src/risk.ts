@@ -30,7 +30,7 @@ export function black76Greeks(
   // price (Black 76, discounted by df)
   const callPrice = df * (F * N(d1) - K * N(d2));
   const putPrice  = df * (K * N(-d2) - F * N(-d1));
-  const price = isCall ? callPrice : putPrice;
+  const price = (isCall ? callPrice : putPrice) / F;  // Convert USD to BTC
 
   const delta = (isCall ? N(d1) : (N(d1) - 1)) * df;
   const gamma = (df * pdf) / (F * sT);

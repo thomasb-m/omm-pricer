@@ -1,13 +1,3 @@
-// apps/server/src/scripts/mockPaperTrade.ts
-/**
- * Paper Trading Validator - MOCK MODE
- * Tests quote engine with simulated market data
- * Logs comparisons to CSV for Excel analysis
- * 
- * Usage:
- *   npx ts-node src/scripts/mockPaperTrade.ts [duration_minutes]
- */
-
 import { PrismaClient } from "@prisma/client";
 import { quoteEngine } from "../quoteEngine";
 import { createWriteStream } from "fs";
@@ -18,20 +8,14 @@ interface Comparison {
   instrument: string;
   strike: number;
   optionType: "C" | "P";
-  
-  // Simulated "market" (slightly offset from your quotes)
   sim_market_bid: number;
   sim_market_ask: number;
   sim_market_mid: number;
   sim_market_spread: number;
-  
-  // Your quotes
   your_bid: number;
   your_ask: number;
   your_mid: number;
   your_spread: number;
-  
-  // Comparison metrics
   edge_vs_mid: number;
   inside_spread_pct: number;
   would_buy: boolean;
@@ -77,9 +61,8 @@ class MockPaperTradeValidator {
   async runValidation() {
     console.log("🏃 Starting validation loop (every 5 seconds)...\n");
 
-    // Test strikes around the money
     const strikes = [90000, 95000, 100000, 105000, 110000];
-    const expiryMs = Date.now() + 7 * 24 * 60 * 60 * 1000; // 7 days out
+    const expiryMs = Date.now() + 7 * 24 * 60 * 60 * 1000;
 
     const intervalId = setInterval(async () => {
       try {
@@ -103,7 +86,6 @@ class MockPaperTradeValidator {
     for (const strike of strikes) {
       for (const optionType of ["C", "P"] as const) {
         try {
-          // Get YOUR quote
           const yourQuote = quoteEngine.getQuote({
             symbol: "BTC",
             strike,
@@ -111,16 +93,12 @@ class MockPaperTradeValidator {
             optionType
           });
 
-          // Simulate "market" data
-          // Market is typically wider than your quote (you have edge)
-          // Add some randomness to simulate market movement
           const noise = (Math.random() - 0.5) * 0.1;
           const simMarketMid = yourQuote.mid * (1 + noise);
-          const simMarketSpread = yourQuote.spread * 1.5; // Market is 50% wider
+          const simMarketSpread = yourQuote.spread * 1.5;
           const simMarketBid = simMarketMid - simMarketSpread / 2;
           const simMarketAsk = simMarketMid + simMarketSpread / 2;
 
-          // Calculate metrics
           const edgeVsMid = yourQuote.mid - simMarketMid;
           
           const insideSpreadPct = simMarketSpread > 0
@@ -202,12 +180,6 @@ class MockPaperTradeValidator {
     this.csvStream.end();
     await this.prisma.$disconnect();
     console.log("✅ Validation complete. Check the CSV file for analysis.");
-    console.log("\n📊 Next Steps:");
-    console.log("1. Open the CSV in Excel");
-    console.log("2. Create pivot table: AVG(edge_vs_mid), AVG(inside_spread_pct)");
-    console.log("3. Chart: edge_vs_mid over time");
-    console.log("4. If edge is positive → tune parameters and test more");
-    console.log("5. If edge is negative → adjust gamma/lambda in config\n");
     process.exit(0);
   }
 }
@@ -226,6 +198,4 @@ async function main() {
   }
 }
 
-if (require.main === module) {
-  main();
-}
+main();

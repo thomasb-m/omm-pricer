@@ -113,7 +113,7 @@ export async function startIngest(prisma: PrismaClient) {
             data: {
               tsMs, instrument: n,
               markIV: mIv,
-              markPrice: 100 + Math.sin(t/20)*2 + (Math.random()-0.5),
+              markPrice: 0.02 + Math.sin(t/20)*0.005 + (Math.random()-0.5)*0.001,
               bid: null,
               ask: null,
               mid: null

@@ -48,7 +48,7 @@ export class QuoteEngine {
 
   constructor() {
     // sensible defaults; will be overwritten at init
-    this.forwards.set("BTC", 45000);
+    this.forwards.set("BTC", 100000);
     this.forwards.set("ETH", 3000);
   }
 
@@ -60,7 +60,7 @@ export class QuoteEngine {
   }
 
   getForward(symbol: string): number {
-    return this.forwards.get(symbol) ?? 45000;
+    return this.forwards.get(symbol) ?? 100000;
   }
 
   getQuote(req: QuoteRequest): Quote {
@@ -179,7 +179,7 @@ export async function initializeWithMarketData(prisma: PrismaClient) {
   });
 
   const btcForward =
-    btcPerp?.markPrice ?? 45000;
+    btcPerp?.markPrice ?? 100000;
 
   console.log(`Initializing BTC with forward: ${btcForward}`);
   quoteEngine.updateForward("BTC", btcForward);

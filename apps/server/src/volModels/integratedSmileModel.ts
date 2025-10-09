@@ -238,7 +238,7 @@ export class IntegratedSmileModel {
       s.nodes.set(strike, node);
     }
 
-    const currentWidth = this.riskScorer.computeWidth({ gamma: pcG.gamma, J_L0: 1.0, J_S0: 0.5, J_C0: 0.3 });
+    const currentWidth = Math.min(0.002, this.riskScorer.computeWidth({ gamma: pcG.gamma, J_L0: 1.0, J_S0: 0.5, J_C0: 0.3 }));
     const bid = Math.max(0, pcMid - currentWidth);
     const ask = pcMid + currentWidth;
     const edge = pcMid - ccMid;
