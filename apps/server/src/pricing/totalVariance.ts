@@ -20,7 +20,7 @@ export function totalVariance(params: {
   const total = Math.max(0, wDiff + wON + wEvt);
   
   // Debug: log breakdown (comment out in prod)
-  if (Math.random() < 0.01) { // 1% sample rate
+  if (true) { // 1% sample rate
     console.log(`[totalVariance] ${symbol}: τ=${tau.toFixed(6)}, wDiff=${wDiff.toFixed(6)}, wON=${wON.toFixed(6)}, wEvt=${wEvt.toFixed(6)}, total=${total.toFixed(6)}`);
   }
 

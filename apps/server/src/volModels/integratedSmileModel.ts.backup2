@@ -11,7 +11,10 @@ import { ModelConfig, getDefaultConfig } from './config/modelConfig';
 import { SmileInventoryController } from './smileInventoryController';
 import { DeltaConventions } from './pricing/blackScholes';
 import { black76Greeks } from "../risk";
+import { overnightMasses } from "../pricing/seasonality";
+import { eventMasses } from "../pricing/eventTable";
 import { timeToExpiryYears } from "../utils/time";
+import { calibrateSVI, MarketSmilePoint } from "./sviCalibration";
 import { totalVariance } from "../pricing/totalVariance";
 import { tauIntegral } from "../pricing/seasonality";
 
@@ -47,13 +50,15 @@ export class IntegratedSmileModel {
   private version = 0;
   private marketIVs = new Map<number, number>();
   private symbol: string;
+  private clockFn: () => number = Date.now;  // ← Injected clock for determinism
 
-  constructor(product: 'BTC'|'ETH'|'SPX' = 'BTC') {
+  constructor(product: 'BTC'|'ETH'|'SPX' = 'BTC', clockFn?: () => number) {
     this.symbol = product;
     this.config = getDefaultConfig(product);
     this.sviConfig = this.convertToSVIConfig(this.config);
     this.inventoryController = new SmileInventoryController(this.config);
     this.riskScorer = new RiskScorer();
+    if (clockFn) this.clockFn = clockFn;  // ← Allow clock injection
   }
 
   private deriveMetricsFromMarketIV(atmIV: number, expiryYears: number): TraderMetrics {
@@ -97,12 +102,12 @@ export class IntegratedSmileModel {
   onTrade(trade: TradeExecution): void {
     const s = this.surfaces.get(trade.expiryMs);
     if (!s) { console.warn(`No surface for expiryMs=${trade.expiryMs}`); return; }
-    const T = timeToExpiryYears(trade.expiryMs, trade.time ?? Date.now());
+    const T = timeToExpiryYears(trade.expiryMs, trade.time ?? this.clockFn());
     if (T <= 0) { console.warn('Expired trade ignored (T<=0):', trade); return; }
 
     this.updateNodeState(s, {
       strike: trade.strike, price: trade.price, size: trade.size,
-      expiryMs: trade.expiryMs, forward: trade.forward, optionType: trade.optionType, time: trade.time ?? Date.now()
+      expiryMs: trade.expiryMs, forward: trade.forward, optionType: trade.optionType, time: trade.time ?? this.clockFn()
     } as any);
 
     const F = trade.forward, K = trade.strike, isCall = trade.optionType === 'C';
@@ -169,9 +174,10 @@ export class IntegratedSmileModel {
     this.updateCC(expiry, m);
   }
 
-  getQuote(expiryMs: number, strike: number, forward: number, optionType: 'C'|'P', marketIV?: number): Quote {
+  getQuote(expiryMs: number, strike: number, forward: number, optionType: 'C'|'P', marketIV?: number, nowMs?: number): Quote {
+    const now = nowMs ?? this.clockFn();  // ← Use injected clock
     const isCall = optionType === 'C';
-    const Traw = timeToExpiryYears(expiryMs);
+    const Traw = timeToExpiryYears(expiryMs, now);
     const T = Math.max(safe(Traw, 0), 1e-8);
     let s = this.surfaces.get(expiryMs);
 
@@ -191,17 +197,18 @@ export class IntegratedSmileModel {
 
     const k = safe(Math.log(strike / Math.max(forward, tiny)), 0);
 
-    // CC mid - use total variance (seasonality + events + overnight)
+    // CC mid - use total variance with clock injection
     const ccVarBase = Math.max(safe(SVI.w(s.cc, k), tiny), tiny);
     const ccSigmaBase = Math.sqrt(ccVarBase / T);
     const ccVarTotal = totalVariance({
       symbol: this.symbol,
       baseSigma: ccSigmaBase,
-      startMs: Date.now(),
+      startMs: now,  // ← Deterministic
       endMs: expiryMs
     });
-    const tau = tauIntegral(Date.now(), expiryMs);
-    let ccIV = Math.max(safe(Math.sqrt(ccVarTotal / Math.max(tau, T)), 1e-8), 1e-8);
+    const tau = Math.max(tauIntegral(now, expiryMs), 1e-6);  // ← Floor tau at 1 microsecond
+    let ccIV = Math.min(Math.max(safe(Math.sqrt(ccVarTotal / tau), 1e-8), 1e-8), 5.0);  // ← Cap at 500%
+    console.log(`[DEBUG-VAR] k=${k.toFixed(4)}, ccVarBase=${ccVarBase}, T=${T}, ccSigmaBase=${ccSigmaBase}`);
     let ccG = black76Greeks(forward, strike, T, ccIV, isCall, 1.0);
     let ccMid = safe(ccG.price, 0);
 
@@ -211,31 +218,32 @@ export class IntegratedSmileModel {
     const pcVarTotal = totalVariance({
       symbol: this.symbol,
       baseSigma: pcSigmaBase,
-      startMs: Date.now(),
+      startMs: now,  // ← Deterministic
       endMs: expiryMs
     });
-    let pcIV = Math.max(safe(Math.sqrt(pcVarTotal / Math.max(tau, T)), 1e-8), 1e-8);
+    let pcIV = Math.min(Math.max(safe(Math.sqrt(pcVarTotal / tau), 1e-8), 1e-8), 5.0);  // ← Cap at 500%
     let pcG = black76Greeks(forward, strike, T, pcIV, isCall, 1.0);
+    console.log(`[DEBUG] IVs calculated: ccIV=${ccIV}, pcIV=${pcIV}, ccVarTotal=${ccVarTotal}, pcVarTotal=${pcVarTotal}, tau=${tau}`);
     let pcMid = safe(pcG.price, 0);
 
     // Fallback mids if collapsed
     const ivFallback = Number.isFinite(marketIV) ? (marketIV as number) : 0.35;
     if (ccMid <= 1e-12) { ccG = black76Greeks(forward, strike, T, ivFallback, isCall, 1.0); ccMid = Math.max(0, ccG.price); ccIV = ivFallback; }
+    console.log(`[DEBUG] Before fallback: ccMid=${ccMid}, pcMid=${pcMid}, isCall=${isCall}, ivFallback=${ivFallback}`);
     if (pcMid <= 1e-12) { pcG = black76Greeks(forward, strike, T, ivFallback, isCall, 1.0); pcMid = Math.max(0, pcG.price); pcIV = ivFallback; }
 
     const midIsSane = (p: number) => Number.isFinite(p) && p >= 0 && p <= Math.max(forward, strike) * 2;
-    if (!midIsSane(ccMid)) ccMid = Math.max(0, forward * ccIV * Math.sqrt(T) * 0.4);
-    if (!midIsSane(pcMid)) pcMid = Math.max(0, forward * pcIV * Math.sqrt(T) * 0.4);
-
+    if (!midIsSane(ccMid)) ccMid = Math.max(0, ccIV * Math.sqrt(T) * 0.4);
+    if (!midIsSane(pcMid)) pcMid = Math.max(0, pcIV * Math.sqrt(T) * 0.4);
     const bucket = DeltaConventions.strikeToBucket(strike, forward, ccIV, T);
 
     let node = s.nodes.get(strike);
     if (!node) {
-      node = { strike, pcAnchor: pcMid, widthRef: this.riskScorer.computeWidth({ gamma: ccG.gamma }), position: 0, lastBucket: bucket, lastTradeTime: Date.now() };
+      node = { strike, pcAnchor: pcMid, widthRef: this.riskScorer.computeWidth({ gamma: ccG.gamma }), position: 0, lastBucket: bucket, lastTradeTime: now };
       s.nodes.set(strike, node);
     }
 
-    const currentWidth = this.riskScorer.computeWidth({ gamma: pcG.gamma, J_L0: 1.0, J_S0: 0.5, J_C0: 0.3 });
+    const currentWidth = Math.min(0.002, this.riskScorer.computeWidth({ gamma: pcG.gamma, J_L0: 1.0, J_S0: 0.5, J_C0: 0.3 }));
     const bid = Math.max(0, pcMid - currentWidth);
     const ask = pcMid + currentWidth;
     const edge = pcMid - ccMid;
@@ -271,5 +279,12 @@ export class IntegratedSmileModel {
   getCCSVI(expiryMs: number): SVIParams | null {
     const s = this.surfaces.get(expiryMs);
     return s ? s.cc : null;
+  }
+
+  resetAllState(): void {
+    this.surfaces.clear();
+    this.marketIVs.clear();
+    this.inventoryController = new SmileInventoryController(this.config);
+    this.version = 0;
   }
 }

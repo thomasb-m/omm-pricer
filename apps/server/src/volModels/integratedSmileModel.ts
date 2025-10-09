@@ -11,7 +11,10 @@ import { ModelConfig, getDefaultConfig } from './config/modelConfig';
 import { SmileInventoryController } from './smileInventoryController';
 import { DeltaConventions } from './pricing/blackScholes';
 import { black76Greeks } from "../risk";
+import { overnightMasses } from "../pricing/seasonality";
+import { eventMasses } from "../pricing/eventTable";
 import { timeToExpiryYears } from "../utils/time";
+import { calibrateSVI, MarketSmilePoint } from "./sviCalibration";
 import { totalVariance } from "../pricing/totalVariance";
 import { tauIntegral } from "../pricing/seasonality";
 
@@ -164,11 +167,74 @@ export class IntegratedSmileModel {
   }
 
   calibrateFromMarket(expiry: number, marketQuotes: MarketQuoteForCalibration[], spot: number): void {
-    if (marketQuotes.length === 0) { console.warn('No market quotes provided for calibration'); return; }
+    if (marketQuotes.length === 0) { 
+      console.warn('No market quotes provided for calibration'); 
+      return; 
+    }
+    
+    console.log(`[calibrateFromMarket] Calibrating with ${marketQuotes.length} market quotes`);
+    
+    // Find ATM IV for fallback
     const atm = marketQuotes.reduce((c, q) => Math.abs(q.strike - spot) < Math.abs(c.strike - spot) ? q : c);
     this.marketIVs.set(expiry, atm.iv);
-    const m = this.deriveMetricsFromMarketIV(atm.iv, expiry);
-    this.updateCC(expiry, m);
+    
+    // Convert expiry (which is in ms) to years for calibration
+    const now = this.clockFn();
+    const T = timeToExpiryYears(expiry, now);
+    
+    if (T <= 0) {
+      console.warn(`Cannot calibrate: expiry has passed (T=${T})`);
+      return;
+    }
+    
+    // Use proper SVI calibration if we have multiple strikes
+    if (marketQuotes.length >= 3) {
+      try {
+        const marketPoints: MarketSmilePoint[] = marketQuotes.map(q => ({
+          strike: q.strike,
+          iv: q.iv,
+          weight: q.weight
+        }));
+        
+        // Use model's config for calibration
+        const calibConfig = {
+          bMin: this.sviConfig.bMin,
+          sigmaMin: this.sviConfig.sigmaMin,
+          rhoMax: this.sviConfig.rhoMax,
+          sMax: this.sviConfig.sMax,
+          c0Min: this.sviConfig.c0Min
+        };
+        
+        const sviParams = calibrateSVI(marketPoints, spot, T, calibConfig);
+        // Enforce minimum sigma
+        if (sviParams.sigma < calibConfig.sigmaMin) {
+          console.log(`[calibrateFromMarket] sigma=${sviParams.sigma.toFixed(6)} below minimum, adjusting to ${calibConfig.sigmaMin}`);
+          sviParams.sigma = calibConfig.sigmaMin;
+        }
+        console.log(`[calibrateFromMarket] Fitted SVI: a=${sviParams.a.toFixed(6)}, b=${sviParams.b.toFixed(6)}, rho=${sviParams.rho.toFixed(3)}, sigma=${sviParams.sigma.toFixed(6)}`);
+        
+        // Directly set the SVI parameters
+        let s = this.surfaces.get(expiry);
+        if (!s) {
+          s = { expiry, cc: sviParams, pc: sviParams, nodes: new Map() };
+          this.surfaces.set(expiry, s);
+        } else {
+          s.cc = sviParams;
+        }
+        this.updatePC(s);
+        this.version++;
+      } catch (err) {
+        console.error(`[calibrateFromMarket] SVI calibration failed:`, err);
+        // Fallback to simple ATM-based calibration
+        const m = this.deriveMetricsFromMarketIV(atm.iv, T);
+        this.updateCC(expiry, m);
+      }
+    } else {
+      // Not enough points for proper calibration, use simple ATM method
+      console.log(`[calibrateFromMarket] Only ${marketQuotes.length} points, using ATM-based calibration`);
+      const m = this.deriveMetricsFromMarketIV(atm.iv, T);
+      this.updateCC(expiry, m);
+    }
   }
 
   getQuote(expiryMs: number, strike: number, forward: number, optionType: 'C'|'P', marketIV?: number, nowMs?: number): Quote {
@@ -178,14 +244,17 @@ export class IntegratedSmileModel {
     const T = Math.max(safe(Traw, 0), 1e-8);
     let s = this.surfaces.get(expiryMs);
 
-    let atmIV: number; let recal = false;
+    let atmIV: number;
     if (marketIV !== undefined) {
       atmIV = marketIV;
-      const cached = this.marketIVs.get(expiryMs);
-      if (!cached || Math.abs(atmIV - cached) > 0.01) { this.marketIVs.set(expiryMs, atmIV); recal = true; }
-    } else atmIV = this.marketIVs.get(expiryMs) ?? 0.35;
+      // Cache the IV but DON'T recalibrate automatically
+      this.marketIVs.set(expiryMs, atmIV);
+    } else {
+      atmIV = this.marketIVs.get(expiryMs) ?? 0.35;
+    }
 
-    if (!s || recal) {
+    // Only initialize CC if surface doesn't exist yet
+    if (!s) {
       const m = this.deriveMetricsFromMarketIV(atmIV, T);
       this.updateCC(expiryMs, m);
       s = this.surfaces.get(expiryMs)!;
@@ -193,43 +262,33 @@ export class IntegratedSmileModel {
     }
 
     const k = safe(Math.log(strike / Math.max(forward, tiny)), 0);
-
-    // CC mid - use total variance with clock injection
+    
+    // CC mid - SVI.w() returns total variance (σ²×T), add jump components
     const ccVarBase = Math.max(safe(SVI.w(s.cc, k), tiny), tiny);
-    const ccSigmaBase = Math.sqrt(ccVarBase / T);
-    const ccVarTotal = totalVariance({
-      symbol: this.symbol,
-      baseSigma: ccSigmaBase,
-      startMs: now,  // ← Deterministic
-      endMs: expiryMs
-    });
-    const tau = Math.max(tauIntegral(now, expiryMs), 1e-6);  // ← Floor tau at 1 microsecond
-    let ccIV = Math.min(Math.max(safe(Math.sqrt(ccVarTotal / tau), 1e-8), 1e-8), 5.0);  // ← Cap at 500%
+    const wON = overnightMasses(now, expiryMs);
+    const wEvt = eventMasses(this.symbol, now, expiryMs);
+    const ccVarTotal = ccVarBase + wON + wEvt;
+    const tau = Math.max(tauIntegral(now, expiryMs), 1e-6);
+    let ccIV = Math.min(Math.max(safe(Math.sqrt(ccVarTotal / tau), 1e-8), 1e-8), 5.0);
     let ccG = black76Greeks(forward, strike, T, ccIV, isCall, 1.0);
     let ccMid = safe(ccG.price, 0);
 
-    // PC mid - use total variance
+    // PC mid - same approach
     const pcVarBase = Math.max(safe(SVI.w(s.pc, k), tiny), tiny);
-    const pcSigmaBase = Math.sqrt(pcVarBase / T);
-    const pcVarTotal = totalVariance({
-      symbol: this.symbol,
-      baseSigma: pcSigmaBase,
-      startMs: now,  // ← Deterministic
-      endMs: expiryMs
-    });
-    let pcIV = Math.min(Math.max(safe(Math.sqrt(pcVarTotal / tau), 1e-8), 1e-8), 5.0);  // ← Cap at 500%
+    const pcVarTotal = pcVarBase + wON + wEvt;
+    let pcIV = Math.min(Math.max(safe(Math.sqrt(pcVarTotal / tau), 1e-8), 1e-8), 5.0);
     let pcG = black76Greeks(forward, strike, T, pcIV, isCall, 1.0);
     let pcMid = safe(pcG.price, 0);
 
     // Fallback mids if collapsed
     const ivFallback = Number.isFinite(marketIV) ? (marketIV as number) : 0.35;
     if (ccMid <= 1e-12) { ccG = black76Greeks(forward, strike, T, ivFallback, isCall, 1.0); ccMid = Math.max(0, ccG.price); ccIV = ivFallback; }
+    console.log(`[DEBUG] Before fallback: ccMid=${ccMid}, pcMid=${pcMid}, isCall=${isCall}, ivFallback=${ivFallback}`);
     if (pcMid <= 1e-12) { pcG = black76Greeks(forward, strike, T, ivFallback, isCall, 1.0); pcMid = Math.max(0, pcG.price); pcIV = ivFallback; }
 
     const midIsSane = (p: number) => Number.isFinite(p) && p >= 0 && p <= Math.max(forward, strike) * 2;
-    if (!midIsSane(ccMid)) ccMid = Math.max(0, forward * ccIV * Math.sqrt(T) * 0.4);
-    if (!midIsSane(pcMid)) pcMid = Math.max(0, forward * pcIV * Math.sqrt(T) * 0.4);
-
+    if (!midIsSane(ccMid)) ccMid = Math.max(0, ccIV * Math.sqrt(T) * 0.4);
+    if (!midIsSane(pcMid)) pcMid = Math.max(0, pcIV * Math.sqrt(T) * 0.4);
     const bucket = DeltaConventions.strikeToBucket(strike, forward, ccIV, T);
 
     let node = s.nodes.get(strike);
