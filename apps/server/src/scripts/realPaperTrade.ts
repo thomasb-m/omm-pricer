@@ -1,5 +1,5 @@
 import { PrismaClient } from "@prisma/client";
-import { quoteEngine } from "../quoteEngine";
+import { quoteEngine, initializeWithMarketData } from "../quoteEngine";
 
 function parseExpiry(instrumentName: string): number {
   const parts = instrumentName.split('-');
@@ -20,6 +20,8 @@ async function main() {
   
   const prisma = new PrismaClient();
   await prisma.$connect();
+
+  const btcForward = await initializeWithMarketData(prisma);
   
   const tickers = await prisma.ticker.findMany({
     where: {
@@ -40,6 +42,22 @@ async function main() {
   
   console.log(`Found ${latestByInstrument.size} instruments\n`);
   
+  // CALIBRATE ONCE with all available market points for this expiry
+  if (latestByInstrument.size > 0) {
+    const firstInstrument = Array.from(latestByInstrument.keys())[0];
+    const expiry17Oct = parseExpiry(firstInstrument);
+    
+    const marketSmile = Array.from(latestByInstrument.values()).map(t => ({
+      strike: parseFloat(t.instrument.split('-')[2]),
+      iv: t.markIV ? t.markIV / 100 : 0.5,
+      weight: 1.0
+    }));
+    
+    console.log(`Calibrating ${marketSmile.length} strikes to market smile...\n`);
+    (quoteEngine as any).calibrateExpiry("BTC", expiry17Oct, marketSmile, btcForward);
+  }
+  
+  // NOW generate quotes
   let count = 0;
   for (const [instrument, ticker] of latestByInstrument) {
     if (count++ >= 3) break;
@@ -65,7 +83,7 @@ async function main() {
     console.log(`  You: ${yourQuote.bid.toFixed(4)} / ${yourQuote.ask.toFixed(4)} (pcMid=${yourQuote.pcMid?.toFixed(6)})`);
     
     const deribitMid = (ticker.bid + ticker.ask) / 2;
-    const edgeUSD = (yourQuote.mid - deribitMid) * 123000;
+    const edgeUSD = (yourQuote.mid - deribitMid) * btcForward;
     console.log(`  Edge: ${edgeUSD > 0 ? '+' : ''}${edgeUSD.toFixed(0)} USD\n`);
   }
   

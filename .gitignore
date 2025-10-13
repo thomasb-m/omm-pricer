@@ -91,3 +91,15 @@ tmp/
 temp/
 # local sqlite db
 apps/server/prisma/prisma/dev.db
+
+# Generated test data
+data/
+out/
+
+# Jest artifacts  
+jest/
+apps/server/jest/
+
+# Database files
+*.db
+*.db-journal

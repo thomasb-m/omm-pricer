@@ -18,12 +18,12 @@ type SymbolState = {
 const YEAR_MS = 365.25 * 24 * 3600 * 1000;
 const DEFAULT_FORWARDS: Record<string, number> = { BTC: 45000, ETH: 3000 };
 const DEFAULT_LAMBDA: FactorVec = [
-  0.00001,   // L0 - scale way down
-  0.00002,   // S0
-  0.0001,    // C0  
-  0.00005,   // S_neg
-  0.00002,   // S_pos
-  0.000001   // F
+  0.08,   // L0 - 10x for testing
+  0.64,   // S0 - 10x
+  0.32,   // C0 - 10x
+  0.24,   // Sneg - 10x
+  0.16,   // Spos - 10x
+  0.04    // F - 10x
 ];
 
 function nowMs() { return Date.now(); }
@@ -89,6 +89,18 @@ class VolModelService {
     return this.getFactors(symbol);
   }
 
+  calibrateExpiry(
+    symbol: string,
+    expiryMs: number,
+    marketQuotes: Array<{ strike: number; iv: number; weight?: number }>,
+    spot: number
+  ) {
+    const s = this.ensure(symbol);
+    s.model.calibrateFromMarket(expiryMs, marketQuotes, spot);
+    console.log(`[volService] Calibrated ${symbol} expiry ${new Date(expiryMs).toISOString().split('T')[0]} with ${marketQuotes.length} quotes`);
+    return true;
+  }
+
   // ------ QUOTES WITH λ·g SHIFT ------
   getQuoteWithIV(
     symbol: string,
@@ -116,15 +128,21 @@ class VolModelService {
         const isCall = optionType === "C";
         const g = factorGreeksFiniteDiff(cc, strike, T, s.forward, isCall, FACTOR_CFG);
         ladg = dot(s.lambda, g);
-        adjPcMid = (q.pcMid ?? rawMid) + (Number.isFinite(ladg) ? ladg : 0);
+        adjPcMid = q.pcMid ?? rawMid;
         bid = Math.max(0, adjPcMid - half);
         ask = adjPcMid + half;
 
-        // Lightweight debug (safe to keep or comment out)
-        // console.debug(`[quote λ·g] ${symbol} K=${strike} T=${T.toFixed(4)} ladg=${ladg.toFixed(4)} mid=${rawMid.toFixed(4)}→${adjPcMid.toFixed(4)}`);
+        // Optional debug logging
+        if (process.env.NODE_ENV === 'development') {
+          // console.debug(`[quote] K=${strike} T=${T.toFixed(4)} ccMid=${rawMid.toFixed(4)} pcMid=${adjPcMid.toFixed(4)} ladg_diag=${ladg.toFixed(4)}`);
+        }
       }
-    } catch {
-      // keep original q on any calc issue
+    } catch (err) {
+      // Fall back to model's PC on any error
+      console.error('[volService.getQuoteWithIV] Error computing diagnostics:', err);
+      adjPcMid = q.pcMid ?? rawMid;
+      bid = Math.max(0, adjPcMid - half);
+      ask = adjPcMid + half;
     }
 
     return {

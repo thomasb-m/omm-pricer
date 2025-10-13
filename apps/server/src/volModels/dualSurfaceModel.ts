@@ -33,6 +33,7 @@ export interface SVIParams {
   export interface NodeState {
     strike: number;
     pcAnchor: number;      // Last traded price
+    pcAnchorTs?: number;
     widthRef: number;      // Width when position established
     position: number;      // Signed size (negative = short)
     lastBucket: string;    // For detecting migrations

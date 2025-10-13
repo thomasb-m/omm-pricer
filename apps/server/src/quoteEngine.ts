@@ -63,6 +63,18 @@ export class QuoteEngine {
     return this.forwards.get(symbol) ?? 100000;
   }
 
+  calibrateExpiry(
+    symbol: string,
+    expiryMs: number,
+    marketQuotes: Array<{ strike: number; iv: number; weight?: number }>,
+    forward: number
+  ): void {
+    // Delegate to volService
+    const volService = require('./volModels/integration/volModelService').volService;
+    volService.calibrateExpiry(symbol, expiryMs, marketQuotes, forward);
+    console.log(`[QuoteEngine] Calibrated ${symbol} expiry ${new Date(expiryMs).toISOString().split('T')[0]} with ${marketQuotes.length} market quotes`);
+  }
+
   getQuote(req: QuoteRequest): Quote {
     const forward = this.getForward(req.symbol);
 
