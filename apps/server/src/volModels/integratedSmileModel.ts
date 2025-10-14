@@ -49,6 +49,9 @@ import {
   type TargetCurvePricingOutput 
 } from './inventory/targetCurvePricing';
 
+import { fitPC } from '../calibration/fitPC';
+import { buildDeltaAnchoredBasis } from '../risk/factors/buildDeltaAnchoredBasis';
+
 const tiny = 1e-12;
 const safe = (x: number, fallback = 0) => (Number.isFinite(x) ? x : fallback);
 
@@ -108,6 +111,30 @@ export class IntegratedSmileModel {
   // Use new variance bump method (vs old SmileInventoryController)
   private useVarianceBump: boolean = false;
 
+  // Price-space PC fit mode (Phase 1B)
+  private usePCFit: boolean = false;
+  
+  // Cache for PC fit results per expiry
+  private pcFitCache = new Map<number, {
+    theta: number[];
+    pcPrices: Map<number, number>;  // strike -> pcPrice
+    timestamp: number;
+    rmse: number;
+  }>();
+  
+  // Batch pricing: collect market data for fitting
+  private marketDataCache = new Map<number, Array<{
+    strike: number;
+    marketMid: number;
+    weight: number;
+  }>>();
+
+  // Debounced refit
+  private refitTimers = new Map<number, NodeJS.Timeout>();
+  private refitDebounceMs = 2000;  // 2 seconds
+  private refitHeartbeatMs = 10000;  // 10 seconds
+  private lastRefitTime = new Map<number, number>();
+
   constructor(product: 'BTC'|'ETH'|'SPX' = 'BTC', clockFn?: () => number) {
     this.symbol = product;
     this.config = getDefaultConfig(product);
@@ -119,19 +146,21 @@ export class IntegratedSmileModel {
     // Initialize from environment
     this.parallelMode = process.env.PARALLEL_MODE === 'true';
     this.useVarianceBump = process.env.USE_VARIANCE_BUMP === 'true';
+    this.usePCFit = process.env.USE_PC_FIT === 'true';
+    
+    console.log('[ISM] Initialization:', {
+      product,
+      parallelMode: this.parallelMode,
+      useVarianceBump: this.useVarianceBump,
+      usePCFit: this.usePCFit,
+      lambdaLearning: !!this.lambdaLearner
+    });
     
     // Initialize lambda learner if enabled
     if (process.env.ENABLE_LAMBDA_LEARNING === 'true') {
       this.lambdaLearner = LambdaLearnerFactory.createDefault(6);
       console.log('[ISM] Lambda learning enabled');
     }
-    
-    console.log('[ISM] Initialization:', {
-      product,
-      parallelMode: this.parallelMode,
-      useVarianceBump: this.useVarianceBump,
-      lambdaLearning: !!this.lambdaLearner
-    });
   }
 
   // ============================================================
@@ -147,6 +176,7 @@ export class IntegratedSmileModel {
     }
     return this.lambda;
   }
+  
   /**
    * Compute edge scalar: e = g^T (Λ Σ g)
    * This gives the required edge per contract
@@ -241,6 +271,212 @@ export class IntegratedSmileModel {
     } catch (err) {
       console.error(`[computeFactorGreeks] Error:`, err);
       return [0, 0, 0, 0, 0, 0];
+    }
+  }
+
+  /**
+   * Fit PC surface for entire expiry using price-space calibration
+   * Called once per expiry when market data is available
+   */
+  private fitPCForExpiry(expiryMs: number, forward: number): void {
+    const marketData = this.marketDataCache.get(expiryMs);
+    if (!marketData || marketData.length < 3) {
+      console.warn(`[fitPCForExpiry] Insufficient market data for expiry ${expiryMs}`);
+      return;
+    }
+    
+    const now = this.clockFn();
+    const T = Math.max(timeToExpiryYears(expiryMs, now), 1e-8);
+    
+    const s = this.surfaces.get(expiryMs);
+    if (!s || !s.cc) {
+      console.warn(`[fitPCForExpiry] No CC surface for expiry ${expiryMs}`);
+      return;
+    }
+    
+    // Build legs array for fitPC
+    const legs = marketData.map(md => {
+      const strike = md.strike;
+      const k = Math.log(strike / Math.max(forward, tiny));
+      
+      // Get CC price
+      const ccVarBase = Math.max(safe(SVI.w(s.cc, k), tiny), tiny);
+      const wON = overnightMasses(now, expiryMs);
+      const wEvt = eventMasses(this.symbol, now, expiryMs);
+      const ccVarTotal = ccVarBase + wON + wEvt;
+      const tau = Math.max(tauIntegral(now, expiryMs), 1e-6);
+      const ccIV = Math.min(Math.max(safe(Math.sqrt(ccVarTotal / tau), 1e-8), 1e-8), 5.0);
+      
+      // Determine option type (assume calls for now, or use heuristic)
+      const isCall = strike >= forward;
+      
+      return {
+        strike,
+        K: strike,
+        T,
+        F: forward,
+        isCall,
+        marketMid: md.marketMid,
+        weight: md.weight
+      };
+    });
+    
+    // Get CC prices
+    const ccPrices = legs.map(leg => {
+      const ccG = black76Greeks(leg.F, leg.strike, leg.T, 
+        this.marketIVs.get(expiryMs) ?? 0.35, leg.isCall, 1.0);
+      return ccG.price;
+    });
+    
+    // Build delta-anchored basis
+    const atmIV = this.marketIVs.get(expiryMs) ?? 0.65;
+    const basis = buildDeltaAnchoredBasis(legs, forward, T, atmIV);
+    
+    console.log(`[fitPCForExpiry] Built delta-anchored basis:`, {
+      expiry: expiryMs,
+      factors: basis.names,
+      numLegs: legs.length
+    });
+    
+    // Diagnostic logging
+    console.log('[fitPCForExpiry] Input validation:', {
+      numLegs: legs.length,
+      marketMids: legs.map(l => l.marketMid.toFixed(6)),
+      ccPrices: ccPrices.map(p => p.toFixed(6)),
+      weights: legs.map(l => l.weight.toFixed(2))
+    });
+
+    // Call fitPC
+    // Scale caps by sqrt(T) - shorter dates need tighter caps
+    const capScale = Math.min(1.0, Math.sqrt(T) * 2);
+    const fitResult = fitPC({
+    legs,
+    ccPrices,
+    factorGreeks: basis.Phi,
+    ridge: 1e-4,
+    thetaMax: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01].map(c => c * capScale)
+});
+    
+    // Cache result
+    const pcPrices = new Map<number, number>();
+    legs.forEach((leg, i) => {
+      pcPrices.set(leg.strike, fitResult.pcPrices[i]);
+    });
+    
+    this.pcFitCache.set(expiryMs, {
+      theta: fitResult.theta,
+      pcPrices,
+      timestamp: now,
+      rmse: fitResult.rmse
+    });
+    
+    console.log(`[fitPCForExpiry] Fitted expiry ${expiryMs}:`, {
+      numLegs: legs.length,
+      factors: basis.names,
+      theta: fitResult.theta.map(t => t.toFixed(6)),
+      rmse: fitResult.rmse.toFixed(6),
+      within1Tick: (fitResult.within1TickPct * 100).toFixed(1) + '%',
+      noArbViolations: fitResult.noArbViolations.length,
+      shrink: fitResult.shrinkApplied.toFixed(3)
+    });
+  }
+  
+  /**
+   * Update market data cache for batch fitting
+   * Call this when you receive market quotes
+   */
+  updateMarketData(expiryMs: number, strike: number, marketMid: number, forward: number, weight: number = 1.0): void {
+    if (!this.marketDataCache.has(expiryMs)) {
+      this.marketDataCache.set(expiryMs, []);
+    }
+    
+    const cache = this.marketDataCache.get(expiryMs)!;
+    
+    // Update or add
+    const existing = cache.findIndex(md => md.strike === strike);
+    if (existing >= 0) {
+      cache[existing] = { strike, marketMid, weight };
+    } else {
+      cache.push({ strike, marketMid, weight });
+    }
+    
+    // Trigger debounced refit
+    if (this.usePCFit) {
+      this.scheduleRefit(expiryMs, forward);  // Use actual forward!
+    }
+  }
+
+  /**
+ * Debounced refit trigger
+ */
+  private scheduleRefit(expiryMs: number, forward: number): void {
+    const now = this.clockFn();
+    const lastRefit = this.lastRefitTime.get(expiryMs) || 0;
+    
+    // NEW: Check if SVI surface exists first
+    const surface = this.surfaces.get(expiryMs);
+    if (!surface || !surface.cc) {
+      console.log(`[scheduleRefit] No SVI surface for ${expiryMs}, skipping refit`);
+      return;
+    }
+    
+    // Clear existing timer
+    const existing = this.refitTimers.get(expiryMs);
+    if (existing) {
+      clearTimeout(existing);
+    }
+    
+    // Validate data quality
+    const dataCache = this.marketDataCache.get(expiryMs);
+    if (!dataCache || dataCache.length < 15) {
+      return;  // Not enough data
+    }
+    
+    // Check strike range
+    const strikes = dataCache.map(d => d.strike).sort((a, b) => a - b);
+    const minStrike = strikes[0];
+    const maxStrike = strikes[strikes.length - 1];
+    const range = maxStrike - minStrike;
+    
+    if (range < 30000) {
+      console.log(`[scheduleRefit] Strike range too narrow (${range}), waiting...`);
+      return;
+    }
+    
+    // NEW: Validate prices are reasonable
+    const badData = dataCache.filter(d => 
+      !Number.isFinite(d.marketMid) || 
+      d.marketMid <= 0 || 
+      d.marketMid > forward ||  // Option can't be worth more than spot
+      d.weight <= 0 ||
+      !Number.isFinite(d.weight)
+    );
+    
+    if (badData.length > 0) {
+      console.warn(`[scheduleRefit] ${badData.length} bad data points, skipping refit`);
+      return;
+    }
+    
+    // Schedule refit
+    const timer = setTimeout(() => {
+      console.log(`[scheduleRefit] Refitting expiry ${expiryMs} (${dataCache.length} strikes, ${minStrike}-${maxStrike})`);
+      this.fitPCForExpiry(expiryMs, forward);
+      this.lastRefitTime.set(expiryMs, this.clockFn());
+      this.refitTimers.delete(expiryMs);
+    }, this.refitDebounceMs);
+    
+    this.refitTimers.set(expiryMs, timer);
+    
+    // Heartbeat: force refit if too much time has passed
+    if (now - lastRefit > this.refitHeartbeatMs) {
+      clearTimeout(timer);
+      this.refitTimers.delete(expiryMs);
+      
+      if (dataCache.length >= 15 && range >= 30000 && badData.length === 0) {
+        console.log(`[scheduleRefit] Heartbeat refit for expiry ${expiryMs}`);
+        this.fitPCForExpiry(expiryMs, forward);
+        this.lastRefitTime.set(expiryMs, now);
+      }
     }
   }
 
@@ -342,7 +578,6 @@ export class IntegratedSmileModel {
     } as any);
 
     // NEW: Update factor inventory if using variance bump
-    console.log(`[ISM.onTrade] useVarianceBump=${this.useVarianceBump}, strike=${trade.strike}, size=${trade.size}`);
     if (this.useVarianceBump) {
       this.updateFactorInventory(
         trade.strike,
@@ -471,6 +706,24 @@ export class IntegratedSmileModel {
         }
         this.updatePC(s);
         this.version++;
+        
+        // Cache market data for PC fit
+        if (this.usePCFit) {
+          marketQuotes.forEach(q => {
+            const weight = q.weight ?? 1.0;
+            // Convert IV to approximate price for caching
+            const k = Math.log(q.strike / Math.max(spot, tiny));
+            const ccVar = SVI.w(sviParams, k);
+            const ccIV = Math.sqrt(Math.max(ccVar, tiny) / Math.max(T, 1e-8));
+            const approxPrice = black76Greeks(spot, q.strike, T, ccIV, q.strike >= spot, 1.0).price;
+            
+            this.updateMarketData(expiry, q.strike, approxPrice, weight);
+          });
+          
+          // Trigger PC fit for this expiry
+          console.log(`[calibrateFromMarket] Triggering PC fit for expiry ${expiry}`);
+          this.fitPCForExpiry(expiry, spot);
+        }
       } catch (err) {
         console.error(`[calibrateFromMarket] SVI calibration failed:`, err);
         const m = this.deriveMetricsFromMarketIV(atm.iv, T);
@@ -578,26 +831,54 @@ export class IntegratedSmileModel {
     let bidSize: number;
     let askSize: number;
 
-    if (this.useVarianceBump) {
+    // ============================================================
+    // PRICING MODE SELECTION (THREE PATHS)
+    // ============================================================
+
+    if (this.usePCFit) {
       // ========================================================
-      // NEW METHOD: Target curve pricing
+      // PATH 3: PRICE-SPACE PC FIT (NEW!)
+      // ========================================================
+      
+      const cachedFit = this.pcFitCache.get(expiryMs);
+      
+      if (cachedFit && cachedFit.pcPrices.has(strike)) {
+        // ✅ Use fitted PC price from cache
+        pcMid = cachedFit.pcPrices.get(strike)!;
+        edge = pcMid - ccMid;
+        halfSpread = 0.0001;
+        bid = Math.max(0, pcMid - halfSpread);
+        ask = pcMid + halfSpread;
+        bidSize = 100;
+        askSize = 100;
+        
+        console.log(`[ISM.getQuote] PC-fit: strike=${strike}, pcMid=${pcMid.toFixed(6)}, edge=${edge.toFixed(6)}`);
+        
+      } else {
+        // ❌ No fit available - use CC
+        console.warn(`[ISM.getQuote] No PC fit for ${expiryMs}/${strike}, using CC`);
+        pcMid = ccMid;
+        edge = 0;
+        halfSpread = 0.0001;
+        bid = Math.max(0, ccMid - halfSpread);
+        ask = ccMid + halfSpread;
+        bidSize = 100;
+        askSize = 100;
+      }
+      
+    } else if (this.useVarianceBump) {
+      // ========================================================
+      // PATH 2: TARGET CURVE (EXISTING)
       // ========================================================
       const lambda = this.getLambda();
       const inventory = this.getInventory();
       const g = this.computeFactorGreeks(strike, expiryMs, forward, isCall);
       const Sigma = this.getCovariance(T);
       
-      // Compute cost per lot: r = g^T Λ Σ g
       const edgePerContract = this.computeEdgeScalar(g, lambda, Sigma, g);
-      const costPerLot = edgePerContract; // In price units (BTC)
-      
-      // PC mid (anchored to last trade)
+      const costPerLot = edgePerContract;
       const lastTradeMid = node.pcAnchor;
-      
-      // Fixed half-spread (market convention)
-      const marketHalfSpread = 0.0001;  // 1bp = 0.01%
-      
-      console.log(`[ISM.getQuote] Target curve: pcMid=${lastTradeMid.toFixed(6)}, ccMid=${ccMid.toFixed(6)}, position=${node.position}, costPerLot=${costPerLot.toFixed(8)}`);
+      const marketHalfSpread = 0.0001;
       
       const pricingResult = computeTargetCurvePricing({
         ccMid,
@@ -606,7 +887,7 @@ export class IntegratedSmileModel {
         costPerLot,
         minTick: 0.0001,
         halfSpread: marketHalfSpread,
-        policySize: 100,  // Quote up to 100 lots per side
+        policySize: 100,
         maxSize: 1000
       });
 
@@ -619,9 +900,6 @@ export class IntegratedSmileModel {
       edge = pricingResult.edge;
       pricingDiag = pricingResult.diagnostics;
 
-      console.log(`[ISM.getQuote] Target curve result: bid=${bid.toFixed(6)} x${bidSize}, ask=${ask.toFixed(6)} x${askSize}, edge=${edge.toFixed(6)}`);
-
-      // Validate result
       if (!Number.isFinite(bid) || !Number.isFinite(ask) || bid < 0 || ask < 0) {
         console.warn(`[ISM.getQuote] Invalid pricing result, falling back to CC`);
         bid = Math.max(0, ccMid - 0.0001);
@@ -635,7 +913,7 @@ export class IntegratedSmileModel {
 
     } else {
       // ========================================================
-      // OLD METHOD: SmileInventoryController (PC surface)
+      // PATH 1: SVI ADJUSTMENT (EXISTING)
       // ========================================================
       const pcVarBase = Math.max(safe(SVI.w(s.pc, k), tiny), tiny);
       const pcVarTotal = pcVarBase + wON + wEvt;
@@ -643,14 +921,12 @@ export class IntegratedSmileModel {
       let pcG = black76Greeks(forward, strike, T, pcIV, isCall, 1.0);
       pcMid = safe(pcG.price, 0);
 
-      // Fallback
       if (pcMid <= 1e-12) {
         pcG = black76Greeks(forward, strike, T, ivFallback, isCall, 1.0);
         pcMid = Math.max(0, pcG.price);
         pcIV = ivFallback;
       }
 
-      // Sanity check
       if (!midIsSane(pcMid)) {
         pcMid = Math.max(0, pcIV * Math.sqrt(T) * 0.4);
       }
@@ -667,8 +943,6 @@ export class IntegratedSmileModel {
       bid = Math.max(0, pcMid - currentWidth);
       ask = pcMid + currentWidth;
       halfSpread = currentWidth;
-      
-      // ADD THESE TWO LINES:
       bidSize = this.config.quotes.sizeBlocks;
       askSize = this.config.quotes.sizeBlocks;
     }
@@ -706,29 +980,30 @@ export class IntegratedSmileModel {
     // INVENTORY-AWARE SIZES (only used if NOT using variance bump)
     // ============================================================
     
-    if (!this.useVarianceBump) {
+    if (!this.useVarianceBump && !this.usePCFit) {
       // Only compute sizes here if we didn't already compute them above
       const baseSize = this.config.quotes.sizeBlocks;
       bidSize = baseSize;
       askSize = baseSize;
     
-    if (this.inventoryController) {
-      const invState = this.inventoryController.getInventoryState();
-      const bucketInv = invState.get(bucket as any);
-      
-      if (bucketInv && typeof (bucketInv as any).vega === 'number') {
-        const vegaSigned = (bucketInv as any).vega as number;
-        const vref = this.config.buckets.find((b) => b.name === bucket)?.edgeParams.Vref ?? 100;
-        const invRatio = Math.min(5, Math.abs(vegaSigned) / Math.max(vref, 1e-6));
+      if (this.inventoryController) {
+        const invState = this.inventoryController.getInventoryState();
+        const bucketInv = invState.get(bucket as any);
         
-        if (vegaSigned < 0) {
-          askSize = Math.max(10, Math.round(baseSize * Math.exp(-invRatio)));
-        } else if (vegaSigned > 0) {
-          bidSize = Math.max(10, Math.round(baseSize * Math.exp(-invRatio)));
+        if (bucketInv && typeof (bucketInv as any).vega === 'number') {
+          const vegaSigned = (bucketInv as any).vega as number;
+          const vref = this.config.buckets.find((b) => b.name === bucket)?.edgeParams.Vref ?? 100;
+          const invRatio = Math.min(5, Math.abs(vegaSigned) / Math.max(vref, 1e-6));
+          
+          if (vegaSigned < 0) {
+            askSize = Math.max(10, Math.round(baseSize * Math.exp(-invRatio)));
+          } else if (vegaSigned > 0) {
+            bidSize = Math.max(10, Math.round(baseSize * Math.exp(-invRatio)));
+          }
         }
       }
     }
-  }
+    
     return { 
       bid, 
       ask, 
