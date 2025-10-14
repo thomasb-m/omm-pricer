@@ -3,6 +3,8 @@
  * Shadow Mode - Full Smile Real Market Data
  */
 
+process.env.USE_PC_FIT = 'true';
+
 import WebSocket from 'ws';
 import { IntegratedSmileModel } from '../volModels/integratedSmileModel';
 import { initConfigManager } from '../config/configManager';
@@ -115,16 +117,24 @@ ws.on('message', (data) => {
       });
       
       // NEW: Feed data to ISM for continuous refitting
-      if (calibrated) {
-        const spread = Math.max(d.best_ask_price - d.best_bid_price, 0.0005);  // Min 5 ticks
+      // Find this section (around line 80-90):
+    if (calibrated) {
+        const spread = Math.max(d.best_ask_price - d.best_bid_price, 0.0005);
+        const size = 1.0;  // Could use volume if available
+        const tick = 0.0001;
+    
+        // ✅ BETTER WEIGHT: Capped between 10-3000
         const weight = Math.min(
-        1.0 / (spread * spread),
-        10000.0  // Cap at 10k to prevent explosions
+        Math.max(
+            size / Math.pow(Math.max(spread, tick), 2),
+            10    // Min weight
+        ),
+        3000  // Max weight (down from 10k)
         );
-
-ism.updateMarketData(EXPIRY_MS, strike, d.mark_price, spot, weight);
-      }
-      
+    
+        ism.updateMarketData(EXPIRY_MS, strike, d.mark_price, spot, weight);
+    }
+        
       // Once we have data spanning a wide enough range, calibrate
       if (!calibrated && marketData.size >= 15) {
         const strikes = Array.from(marketData.keys()).sort((a, b) => a - b);

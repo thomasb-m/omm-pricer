@@ -51,6 +51,9 @@ import {
 
 import { fitPC } from '../calibration/fitPC';
 import { buildDeltaAnchoredBasis } from '../risk/factors/buildDeltaAnchoredBasis';
+import { priceBTC_fromBlack76, greeksBTC_fromBlack76 } from "../pricing/ccUnits";
+import { msToYears, isCallFrom } from "../utils/timeAndType";
+
 
 const tiny = 1e-12;
 const safe = (x: number, fallback = 0) => (Number.isFinite(x) ? x : fallback);
@@ -294,42 +297,88 @@ export class IntegratedSmileModel {
       return;
     }
     
-    // Build legs array for fitPC
-    const legs = marketData.map(md => {
-      const strike = md.strike;
-      const k = Math.log(strike / Math.max(forward, tiny));
-      
-      // Get CC price
-      const ccVarBase = Math.max(safe(SVI.w(s.cc, k), tiny), tiny);
-      const wON = overnightMasses(now, expiryMs);
-      const wEvt = eventMasses(this.symbol, now, expiryMs);
-      const ccVarTotal = ccVarBase + wON + wEvt;
-      const tau = Math.max(tauIntegral(now, expiryMs), 1e-6);
-      const ccIV = Math.min(Math.max(safe(Math.sqrt(ccVarTotal / tau), 1e-8), 1e-8), 5.0);
-      
-      // Determine option type (assume calls for now, or use heuristic)
-      const isCall = strike >= forward;
-      
-      return {
-        strike,
-        K: strike,
-        T,
-        F: forward,
-        isCall,
-        marketMid: md.marketMid,
-        weight: md.weight
-      };
-    });
+    // ✅ VALIDATION: Check CC surface is usable
+    const testK = 0;  // ATM in log-moneyness
+    const testVar = SVI.w(s.cc, testK);
+    if (!Number.isFinite(testVar) || testVar <= 0) {
+      console.warn(`[fitPCForExpiry] Invalid CC surface (ATM variance=${testVar}), aborting`);
+      return;
+    }
     
-    // Get CC prices
-    const ccPrices = legs.map(leg => {
-      const ccG = black76Greeks(leg.F, leg.strike, leg.T, 
-        this.marketIVs.get(expiryMs) ?? 0.35, leg.isCall, 1.0);
-      return ccG.price;
-    });
-    
-    // Build delta-anchored basis
+    // Get ATM IV once for all strikes (simpler and more stable)
     const atmIV = this.marketIVs.get(expiryMs) ?? 0.65;
+    
+    // ✅ BUILD LEGS: Simple structure
+    let legs = marketData.map(md => ({
+      strike: md.strike,
+      K: md.strike,
+      T,
+      F: forward,
+      isCall: true,   
+      marketMid: md.marketMid,
+      weight: md.weight
+    }));
+    
+    // ✅ FILTER: Remove deep ITM strikes (±30% of forward)
+    const validLegs = legs.filter(leg => 
+      leg.strike >= forward * 0.70 && leg.strike <= forward * 1.30
+    );
+    
+    if (validLegs.length < 10) {
+      console.warn(`[fitPCForExpiry] Only ${validLegs.length} strikes after ITM filter (need 10+)`);
+      return;
+    }
+    
+    if (validLegs.length < legs.length) {
+      console.log(`[fitPCForExpiry] Filtered ${legs.length - validLegs.length} deep ITM strikes (${validLegs.length} remain)`);
+    }
+    
+    legs = validLegs;
+    
+    // CC prices are already in BTC units from black76Greeks(...).price in this codebase.
+// Do NOT divide by forward again.
+const ccPrices = legs.map(leg => {
+  const ccG = black76Greeks(forward, leg.strike, T, atmIV, leg.isCall, 1.0);
+  let priceBTC = ccG.price;
+
+  // Intrinsic floor (in BTC) with tiny slack
+  const intrinsicBTC = Math.max(
+    0,
+    leg.isCall ? Math.max(forward - leg.strike, 0) : Math.max(leg.strike - forward, 0)
+  ) / Math.max(forward, 1e-12);
+
+  priceBTC = Math.max(priceBTC, intrinsicBTC - 2e-6);
+
+  if (!Number.isFinite(priceBTC) || priceBTC < 0) {
+    console.error(`[fitPCForExpiry] Invalid CC priceBTC at K=${leg.strike}: ${priceBTC}`);
+    return 0;
+  }
+  return priceBTC;
+});
+
+console.log('[fitPCForExpiry] Sanity scales:', {
+  ccMin: Math.min(...ccPrices).toExponential(2),
+  ccMax: Math.max(...ccPrices).toExponential(2),
+  mktMin: Math.min(...marketData.map(d => d.marketMid)).toExponential(2),
+  mktMax: Math.max(...marketData.map(d => d.marketMid)).toExponential(2)
+});
+
+    
+    // ✅ VALIDATION: Check for bad CC prices
+    const badCount = ccPrices.filter(p => p === 0 || !Number.isFinite(p)).length;
+    const zeroCount = ccPrices.filter(p => p < 1e-8).length;
+    
+    if (badCount > ccPrices.length * 0.2) {
+      console.error(`[fitPCForExpiry] ${badCount}/${ccPrices.length} invalid CC prices (${(badCount/ccPrices.length*100).toFixed(0)}%), aborting`);
+      return;
+    }
+    
+    if (ccPrices.every(p => p === 0 || p < 1e-8)) {
+      console.error(`[fitPCForExpiry] ALL CC prices near zero, aborting`);
+      return;
+    }
+    
+    // ✅ BUILD DELTA-ANCHORED BASIS
     const basis = buildDeltaAnchoredBasis(legs, forward, T, atmIV);
     
     console.log(`[fitPCForExpiry] Built delta-anchored basis:`, {
@@ -338,26 +387,38 @@ export class IntegratedSmileModel {
       numLegs: legs.length
     });
     
-    // Diagnostic logging
+    // ✅ DIAGNOSTIC LOGGING (more precision!)
     console.log('[fitPCForExpiry] Input validation:', {
       numLegs: legs.length,
-      marketMids: legs.map(l => l.marketMid.toFixed(6)),
-      ccPrices: ccPrices.map(p => p.toFixed(6)),
-      weights: legs.map(l => l.weight.toFixed(2))
+      marketMids: legs.map(l => l.marketMid.toFixed(8)),  // 8 decimals!
+      ccPrices: ccPrices.map(p => p.toFixed(8)),          // 8 decimals!
+      weights: legs.map(l => l.weight.toFixed(2)),
+      strikes: legs.map(l => l.strike),
+      forward: forward.toFixed(2),
+      atmIV: atmIV.toFixed(4),
+      T: T.toFixed(6)
     });
-
-    // Call fitPC
-    // Scale caps by sqrt(T) - shorter dates need tighter caps
+  
+    // ✅ CALL fitPC with adaptive caps
     const capScale = Math.min(1.0, Math.sqrt(T) * 2);
     const fitResult = fitPC({
-    legs,
-    ccPrices,
-    factorGreeks: basis.Phi,
-    ridge: 1e-4,
-    thetaMax: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01].map(c => c * capScale)
-});
+      legs,
+      ccPrices,
+      factorGreeks: basis.Phi,
+      ridge: 1e-4,
+      thetaMax: Array(basis.names.length).fill(0.01 * capScale),
+    });
     
-    // Cache result
+    // ✅ VALIDATION: Check for solver issues
+    const thetaAllEqual = fitResult.theta.every(t => 
+      Math.abs(t - fitResult.theta[0]) < 1e-9
+    );
+    
+    if (thetaAllEqual) {
+      console.warn(`[fitPCForExpiry] All theta equal (${fitResult.theta[0].toFixed(8)}), possible solver issue`);
+    }
+    
+    // ✅ CACHE RESULT
     const pcPrices = new Map<number, number>();
     legs.forEach((leg, i) => {
       pcPrices.set(leg.strike, fitResult.pcPrices[i]);
@@ -370,14 +431,18 @@ export class IntegratedSmileModel {
       rmse: fitResult.rmse
     });
     
-    console.log(`[fitPCForExpiry] Fitted expiry ${expiryMs}:`, {
+    // ✅ SUCCESS LOGGING
+    console.log(`[fitPCForExpiry] ✅ Fitted expiry ${expiryMs}:`, {
       numLegs: legs.length,
       factors: basis.names,
-      theta: fitResult.theta.map(t => t.toFixed(6)),
-      rmse: fitResult.rmse.toFixed(6),
+      theta: fitResult.theta.map(t => t.toFixed(8)),
+      rmse: (fitResult.rmse * 10000).toFixed(2) + ' bps',
       within1Tick: (fitResult.within1TickPct * 100).toFixed(1) + '%',
       noArbViolations: fitResult.noArbViolations.length,
-      shrink: fitResult.shrinkApplied.toFixed(3)
+      shrink: fitResult.shrinkApplied.toFixed(3),
+      condG: fitResult.condG.toExponential(2),
+      avgCCPrice: (ccPrices.reduce((s, p) => s + p, 0) / ccPrices.length).toFixed(6),
+      avgMarketMid: (legs.reduce((s, l) => s + l.marketMid, 0) / legs.length).toFixed(6)
     });
   }
   
@@ -413,26 +478,34 @@ export class IntegratedSmileModel {
     const now = this.clockFn();
     const lastRefit = this.lastRefitTime.get(expiryMs) || 0;
     
-    // NEW: Check if SVI surface exists first
-    const surface = this.surfaces.get(expiryMs);
-    if (!surface || !surface.cc) {
-      console.log(`[scheduleRefit] No SVI surface for ${expiryMs}, skipping refit`);
-      return;
-    }
-    
     // Clear existing timer
     const existing = this.refitTimers.get(expiryMs);
     if (existing) {
       clearTimeout(existing);
     }
     
-    // Validate data quality
+    // ✅ CHECK 1: CC surface exists and is valid
+    const surface = this.surfaces.get(expiryMs);
+    if (!surface || !surface.cc) {
+      console.log(`[scheduleRefit] No SVI surface for ${expiryMs}, skipping`);
+      return;
+    }
+    
+    // ✅ CHECK 2: Test CC variance is reasonable
+    const testK = 0;  // ATM
+    const ccVar = SVI.w(surface.cc, testK);
+    if (!Number.isFinite(ccVar) || ccVar <= 0) {
+      console.warn(`[scheduleRefit] Invalid CC variance (${ccVar}), skipping`);
+      return;
+    }
+    
+    // ✅ CHECK 3: Validate data quality
     const dataCache = this.marketDataCache.get(expiryMs);
     if (!dataCache || dataCache.length < 15) {
       return;  // Not enough data
     }
     
-    // Check strike range
+    // ✅ CHECK 4: Strike range validation
     const strikes = dataCache.map(d => d.strike).sort((a, b) => a - b);
     const minStrike = strikes[0];
     const maxStrike = strikes[strikes.length - 1];
@@ -443,11 +516,11 @@ export class IntegratedSmileModel {
       return;
     }
     
-    // NEW: Validate prices are reasonable
+    // ✅ CHECK 5: Validate prices are reasonable
     const badData = dataCache.filter(d => 
       !Number.isFinite(d.marketMid) || 
       d.marketMid <= 0 || 
-      d.marketMid > forward ||  // Option can't be worth more than spot
+      d.marketMid > 1.0 ||  // Option can't be worth more than 1 BTC
       d.weight <= 0 ||
       !Number.isFinite(d.weight)
     );
@@ -715,9 +788,11 @@ export class IntegratedSmileModel {
             const k = Math.log(q.strike / Math.max(spot, tiny));
             const ccVar = SVI.w(sviParams, k);
             const ccIV = Math.sqrt(Math.max(ccVar, tiny) / Math.max(T, 1e-8));
-            const approxPrice = black76Greeks(spot, q.strike, T, ccIV, q.strike >= spot, 1.0).price;
-            
-            this.updateMarketData(expiry, q.strike, approxPrice, weight);
+            // black76Greeks(...).price is already BTC; pass it through as-is
+            // AFTER – seed with *call* price in BTC units
+            const approxPriceBTC = priceBTC_fromBlack76(spot, q.strike, T, ccIV, true);
+            this.updateMarketData(expiry, q.strike, approxPriceBTC, spot, weight);
+
           });
           
           // Trigger PC fit for this expiry

@@ -214,3 +214,85 @@ export function isPDHeuristic(M: number[][]): boolean {
   }
   return true;
 }
+
+export function matTvec(A: number[][], w: number[], v: number[]): number[] {
+  // returns A^T * (W * v), where W is diagonal with w
+  const m = A.length;
+  const n = A[0].length;
+  const out = new Array(n).fill(0);
+  
+  for (let i = 0; i < m; i++) {
+    const wi = w[i];
+    const Ai = A[i];
+    const vi = v[i];
+    for (let j = 0; j < n; j++) {
+      out[j] += Ai[j] * (wi * vi);
+    }
+  }
+  
+  return out;
+}
+
+export function matTmat(A: number[][], w: number[]): number[][] {
+  // returns A^T * (W * A)
+  const m = A.length;
+  const n = A[0].length;
+  const out = Array.from({length: n}, () => new Array(n).fill(0));
+  
+  for (let i = 0; i < m; i++) {
+    const wi = w[i];
+    const Ai = A[i];
+    for (let j = 0; j < n; j++) {
+      const Aij = Ai[j];
+      for (let k = 0; k < n; k++) {
+        out[j][k] += Aij * (wi * Ai[k]);
+      }
+    }
+  }
+  
+  return out;
+}
+
+export function choleskySolve(A: number[][], b: number[]): number[] {
+  // Solve A x = b for SPD A via Cholesky
+  const n = A.length;
+  const L = Array.from({length: n}, () => new Array(n).fill(0));
+  
+  // Cholesky decomposition
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j <= i; j++) {
+      let s = 0;
+      for (let k = 0; k < j; k++) {
+        s += L[i][k] * L[j][k];
+      }
+      
+      if (i === j) {
+        L[i][j] = Math.sqrt(Math.max(A[i][i] - s, 1e-18));
+      } else {
+        L[i][j] = (A[i][j] - s) / L[j][j];
+      }
+    }
+  }
+  
+  // Forward solve L y = b
+  const y = new Array(n).fill(0);
+  for (let i = 0; i < n; i++) {
+    let s = b[i];
+    for (let k = 0; k < i; k++) {
+      s -= L[i][k] * y[k];
+    }
+    y[i] = s / L[i][i];
+  }
+  
+  // Back solve L^T x = y
+  const x = new Array(n).fill(0);
+  for (let i = n - 1; i >= 0; i--) {
+    let s = y[i];
+    for (let k = i + 1; k < n; k++) {
+      s -= L[k][i] * x[k];
+    }
+    x[i] = s / L[i][i];
+  }
+  
+  return x;
+}

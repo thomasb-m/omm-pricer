@@ -176,6 +176,14 @@ export interface PCFitInput {
     }
     
     let theta = choleskySolve(GTWG, GTWy);
+
+    // ✅ SANITY CHECK: Detect solver failure
+    if (theta.every(t => Math.abs(t - theta[0]) < 1e-9)) {
+        console.warn(`[fitPC] All theta equal (${theta[0].toFixed(6)}), possible solver issue`);
+        console.warn(`[fitPC] GTWG diagonal:`, GTWG.map((row, i) => row[i].toExponential(2)));
+        console.warn(`[fitPC] GTWy:`, GTWy.map(y => y.toExponential(2)));
+        console.warn(`[fitPC] Condition number: ${condG.toExponential(2)}`);
+    }
     
     // Apply caps if provided
     if (thetaMax) {
