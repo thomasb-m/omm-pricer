@@ -6,19 +6,26 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:unit": "vitest run apps/server/tests/unit",
-    "test:golden": "vitest run apps/server/tests/unit/cc_parity_glob.test.ts",
+    "test:golden": "vitest -c apps/server/vitest.config.ts run apps/server/tests/unit/cc_parity_glob.test.ts",
     "fixtures:python": "bash scripts/gen-python-fixtures.sh",
     "ci:step2": "npm run fixtures:python && npm run test:golden",
     "test:noarb": "vitest run apps/server/tests/unit/noArb.test.ts",
-    "ci:step3": "npm run fixtures:python && npm run test:golden && npm run test:noarb"
+    "ci:step3": "npm run fixtures:python && npm run test:golden && npm run test:noarb",
+    "test:pc": "npm run -w packages/pc-fit test",
+    "ci:step4": "npm run -w packages/pc-fit build && npm run -w packages/pc-fit test && npm run test:golden && npm run ci:step3"
   },
   "devDependencies": {
     "@types/node": "^22.7.4",
     "fast-check": "^3.19.0",
     "glob": "^11.0.0",
+    "js-yaml": "^4.1.0",
     "typescript": "^5.6.3",
+    "vite-tsconfig-paths": "^5.1.4",
     "vitest": "^2.1.3",
     "yaml": "^2.6.0",
     "zod": "^3.23.8"
-  }
+  },
+  "workspaces": [
+    "packages/*"
+  ]
 }

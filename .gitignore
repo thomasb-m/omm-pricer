@@ -114,3 +114,6 @@ apps/server/prisma/dev.db
 vol-core-validation/output/*.png
 vol-core-validation/output/*.csv
 vol-core-validation/output/*.md
+venv/
+.venv/
+vol-core-validation.zip
