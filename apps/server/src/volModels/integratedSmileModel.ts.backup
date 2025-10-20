@@ -14,6 +14,8 @@ import { black76Greeks } from "../risk";
 import { timeToExpiryYears } from "../utils/time";
 import { totalVariance } from "../pricing/totalVariance";
 import { tauIntegral } from "../pricing/seasonality";
+import { getConfigManager } from '../config/configManager';
+import type { StrategyProfile } from '../config/strategyProfiles';
 
 const tiny = 1e-12;
 const safe = (x: number, fallback = 0) => (Number.isFinite(x) ? x : fallback);
@@ -48,15 +50,25 @@ export class IntegratedSmileModel {
   private marketIVs = new Map<number, number>();
   private symbol: string;
   private clockFn: () => number = Date.now;  // ← Injected clock for determinism
+  private configManager = getConfigManager();
+  private profileCache = new Map<string, StrategyProfile>();
 
   constructor(product: 'BTC'|'ETH'|'SPX' = 'BTC', clockFn?: () => number) {
-    this.symbol = product;
-    this.config = getDefaultConfig(product);
-    this.sviConfig = this.convertToSVIConfig(this.config);
-    this.inventoryController = new SmileInventoryController(this.config);
-    this.riskScorer = new RiskScorer();
-    if (clockFn) this.clockFn = clockFn;  // ← Allow clock injection
-  }
+  this.symbol = product;
+  this.config = getDefaultConfig(product);
+  this.sviConfig = this.convertToSVIConfig(this.config);
+  this.inventoryController = new SmileInventoryController(this.config);
+  this.riskScorer = new RiskScorer();
+  if (clockFn) this.clockFn = clockFn;
+  
+  // ✅ ADD CONFIG LOGGING
+  const prodConfig = this.configManager.getProductionConfig();
+  console.log('[ISM] Initialized with config:', {
+    environment: prodConfig.environment,
+    product: prodConfig.product,
+    enableAlpha: prodConfig.enableAlpha
+  });
+}
 
   private deriveMetricsFromMarketIV(atmIV: number, expiryYears: number): TraderMetrics {
     const L0 = atmIV * atmIV * expiryYears;
@@ -176,6 +188,20 @@ export class IntegratedSmileModel {
     const isCall = optionType === 'C';
     const Traw = timeToExpiryYears(expiryMs, now);
     const T = Math.max(safe(Traw, 0), 1e-8);
+    const instrumentId = `${this.symbol}-${expiryMs}-${strike}-${optionType}`;
+    let profile = this.profileCache.get(instrumentId);
+    if (!profile) {
+    profile = this.configManager.getStrategyProfile({
+      instrumentId,
+      strike,
+      forward,
+      T,
+      iv: marketIV ?? 0.65,
+      rvZ: 0
+    });
+    this.profileCache.set(instrumentId, profile);
+    console.log(`[ISM] Profile selected for ${instrumentId}: ${profile.name} (clip=${profile.clip})`);
+  }
     let s = this.surfaces.get(expiryMs);
 
     let atmIV: number; let recal = false;

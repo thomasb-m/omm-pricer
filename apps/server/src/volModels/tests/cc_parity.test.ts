@@ -3,8 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { priceCC } from "../cc/priceCC";
-import { sviIV } from "../../../../../packages/vol-core/src/smile";
-import { bpsToAbs } from "../../../../../packages/vol-core/src/units";
+import { sviIV } from "@vol-core/smile";
+import { bpsToAbs } from "@vol-core/units";
 
 // Types (lightweight)
 type SVIParams = { a:number; b:number; rho:number; m:number; sigma:number; };

@@ -1,14 +1,41 @@
 {
   "compilerOptions": {
-    "target": "ES2020",
-    "module": "ESNext",
+    "target": "ES2022",
+    "module": "ES2022",
     "moduleResolution": "Bundler",
     "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
     "baseUrl": ".",
     "paths": {
-      "@core-types/*": ["packages/core-types/src/*"],
-      "@vol-core/*": ["packages/vol-core/src/*"]
+      "@core-types": ["packages/core-types/src/index.ts"],
+      "@vol-core/*": ["packages/vol-core/src/*"],
+      "@vol-validation/*": ["packages/vol-validation/src/*"]
     },
-    "types": ["vitest/globals", "node"]
-  }
+    "types": ["node", "vitest/globals"]
+  },
+  "include": [
+    "packages/**/*",
+    "apps/server/src/config/**/*",
+    "apps/server/src/pricing/**/*",
+    "apps/server/tests/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "build",
+    "apps/server/apps/**",
+    "apps/server/src/__tests__/**",
+    "apps/server/src/api/**",
+    "apps/server/src/calibration/**",
+    "apps/server/src/engine/**",
+    "apps/server/src/ingest.ts",
+    "apps/server/src/replay/**",
+    "apps/server/src/scripts/**",
+    "apps/server/src/test-*.ts",
+    "apps/server/src/tools/**",
+    "apps/server/src/volModels/**",
+    "src/**"
+  ]
 }

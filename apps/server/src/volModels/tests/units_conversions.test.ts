@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { bpsToAbs, absToBps, roundToTick, daysToYearFraction, yearFractionToDays } from "../../../../../packages/vol-core/src/units";
+import { bpsToAbs, absToBps, roundToTick, daysToYearFraction, yearFractionToDays } from "@vol-core/units";
 
 describe("Units conversions", () => {
   it("bps ↔ abs round-trip at a base", () => {

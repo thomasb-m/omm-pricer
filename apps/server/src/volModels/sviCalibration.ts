@@ -42,11 +42,11 @@ export function calibrateSVI(
     Math.abs(p.k) < Math.abs(best.k) ? p : best
   );
 
-  // Initial guess based on ATM and simple heuristics
+  /// Initial guess based on ATM and simple heuristics
   const L0_init = atmPoint.w;
-  const a_init = L0_init * 0.875;  // Rough heuristic
-  const b_init = Math.max(config.bMin, L0_init * 0.5);
-  const sigma_init = Math.max(config.sigmaMin, 0.1);
+  const a_init = L0_init * 0.875;
+  const b_init = Math.max(0.01, L0_init * 0.5);  // ✅ Higher minimum
+  const sigma_init = Math.max(0.05, 0.15);       // ✅ START AT 0.05, not sigmaMin!
   const rho_init = 0.0;
 
   // Simple gradient-free optimization using Nelder-Mead-like approach
@@ -57,8 +57,8 @@ export function calibrateSVI(
   // Grid search over key parameters
   const aRange = linspace(L0_init * 0.5, L0_init * 1.2, 5);
   const bRange = linspace(config.bMin, Math.min(L0_init, 0.1), 5);
-  const sigmaRange = linspace(config.sigmaMin, 0.3, 5);
-  const rhoRange = linspace(-0.9, 0.9, 7);
+  const sigmaRange = linspace(Math.max(config.sigmaMin, 0.05), 0.5, 5);  // ✅ START AT 0.05, not sigmaMin!
+  const rhoRange = linspace(-Math.min(config.rhoMax, 0.9), Math.min(config.rhoMax, 0.9), 7);  // ✅ Use config.rhoMax
 
   for (const a of aRange) {
     for (const b of bRange) {

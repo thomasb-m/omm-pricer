@@ -1,34 +1,29 @@
-/**
- * Core domain types shared across pricing, calibration and risk.
- */
-
 export type DayCount = 'ACT_365' | 'ACT_365_25' | 'BUS_252';
 
 export interface InstrumentMeta {
-  symbol: string;              // e.g. "BTC-20251025-100000-C"
-  asset: string;               // e.g. "BTC"
-  multiplier: number;          // contract multiplier
+  symbol: string;
+  asset: string;
+  multiplier: number;
   tickSize: number;
   lotSize: number;
-  currency: string;            // PnL currency (e.g. "USD")
+  currency: string;
   isCall: boolean;
   strike: number;
-  expirySec: number;           // unix seconds
+  expirySec: number;
 }
 
 export interface Quote {
-  forward: number;      // forward price (pricing should happen on forward)
-  rate?: number;        // optional risk-free rate (if you need discounting elsewhere)
+  forward: number;
+  rate?: number;
   bid?: number;
   ask?: number;
   mid?: number;
   last?: number;
-  timestampSec: number; // unix seconds
+  timestampSec: number;
   instrument: InstrumentMeta;
 }
 
 export interface SVIParams {
-  // Raw SVI: w(k) = a + b*( rho*(k-m) + sqrt( (k-m)^2 + sigma^2 ) )
   a: number;
   b: number;
   rho: number;
@@ -37,17 +32,24 @@ export interface SVIParams {
 }
 
 export interface SmilePoint {
-  k: number;         // log-moneyness = ln(K/F)
-  iv: number;        // implied vol (annualized)
-  T: number;         // time to expiry (years)
+  k: number;
+  iv: number;
+  T: number;
 }
 
 export interface PriceBreakdown {
   intrinsic: number;
-  tv: number;       // time value (extrinsic)
-  price: number;    // intrinsic + tv
+  tv: number; // time value
+  price: number;
+  iv?: number;  // optional
+  vega?: number;
+  delta?: number;
+  gamma?: number;
+  df?: number;  // ADDED
+  T?: number;   // ADDED
 }
 
+// Config types
 export interface FeaturesConfig {
   enablePricing: boolean;
   enableFitter: boolean;
@@ -57,7 +59,6 @@ export interface FeaturesConfig {
 
 export interface PrimitivesConfig {
   daycount: DayCount;
-  secondsPerYear: number;
   epsilonT: number;
 }
 

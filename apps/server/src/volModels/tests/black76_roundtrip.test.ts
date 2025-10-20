@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { black76Call, impliedVolFromPrice } from "../../../../../packages/vol-core/src/black76";
+import { black76Call, impliedVolFromPrice } from "@vol-core/black76";
 
 describe("Black-76 round-trip (price ↔ IV ↔ price)", () => {
   it("recovers price within tight tolerance", () => {

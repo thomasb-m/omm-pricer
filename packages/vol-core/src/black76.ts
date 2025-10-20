@@ -1,93 +1,107 @@
-// packages/vol-core/src/black76.ts
-// Minimal, robust Black-76 call pricing + vega + implied vol solver.
-const SQRT2 = Math.SQRT2;
-const SQRT2PI = Math.sqrt(2 * Math.PI);
+const SQRT_2PI = Math.sqrt(2 * Math.PI);
 
-export function normPdf(x: number): number {
-  return Math.exp(-0.5 * x * x) / SQRT2PI;
+function cnd(x: number): number {
+  const a1 = 0.319381530, a2 = -0.356563782, a3 = 1.781477937, 
+        a4 = -1.821255978, a5 = 1.330274429;
+  const L = Math.abs(x);
+  const k = 1.0 / (1.0 + 0.2316419 * L);
+  const poly = ((((a5 * k + a4) * k + a3) * k + a2) * k + a1) * k;
+  const approx = 1.0 - (Math.exp(-L * L / 2) / SQRT_2PI) * poly;
+  return x >= 0 ? approx : 1 - approx;
 }
 
-// Abramowitz-Stegun erf approximation for stable norm CDF
-function erf(x: number): number {
-  const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741, a4 = -1.453152027, a5 = 1.061405429, p = 0.3275911;
-  const sign = x < 0 ? -1 : 1;
-  const ax = Math.abs(x);
-  const t = 1 / (1 + p * ax);
-  const y = 1 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-ax * ax);
-  return sign * y;
+function pdf(x: number): number {
+  return Math.exp(-0.5 * x * x) / SQRT_2PI;
 }
 
-export function normCdf(x: number): number {
-  return 0.5 * (1 + erf(x / SQRT2));
-}
-
-export function d1(F: number, K: number, T: number, iv: number): number {
-  return (Math.log(F / K) + 0.5 * iv * iv * T) / (iv * Math.sqrt(T));
-}
-
-export function d2(F: number, K: number, T: number, iv: number): number {
-  return d1(F, K, T, iv) - iv * Math.sqrt(T);
-}
-
-export function black76Call(F: number, K: number, T: number, iv: number, df: number = 1.0): number {
-  if (T <= 0) return Math.max(F - K, 0) * df;
-  const _d1 = d1(F, K, T, iv);
-  const _d2 = _d1 - iv * Math.sqrt(T);
-  return df * (F * normCdf(_d1) - K * normCdf(_d2));
-}
-
-export function vega(F: number, K: number, T: number, iv: number, df: number = 1.0): number {
-  if (T <= 0) return 0;
-  const _d1 = d1(F, K, T, iv);
-  return df * F * Math.sqrt(T) * normPdf(_d1);
-}
-
-/**
- * Safe implied vol via bracketed Newton—falls back to bisection if needed.
- * Returns a non-negative IV; caps at ivMax.
- */
-export function impliedVolFromPrice(
-  targetPrice: number,
-  F: number,
-  K: number,
+export function black76Call(
+  forward: number,
+  strike: number,
   T: number,
-  df: number = 1.0,
-  ivInit: number = 0.3,
-  ivMax: number = 5.0,
-  tol: number = 1e-10,
-  maxIter: number = 100
+  vol: number,
+  df = 1.0
 ): number {
-  if (T <= 0) return 0;
-  const intrinsic = Math.max(F - K, 0) * df;
-  const minPrice = intrinsic;
-  const maxPrice = df * F;
-
-  const p = Math.min(Math.max(targetPrice, minPrice), maxPrice);
-
-  let ivLo = 1e-8;
-  let ivHi = Math.min(ivMax, 5.0);
-  const priceAt = (vol: number) => black76Call(F, K, T, vol, df);
-  while (priceAt(ivLo) > p && ivLo > 1e-12) ivLo *= 0.5;
-  while (priceAt(ivHi) < p && ivHi < ivMax) ivHi *= 1.5;
-
-  let iv = Math.min(Math.max(ivInit, ivLo), ivHi);
-
-  for (let i = 0; i < maxIter; i++) {
-    const price = priceAt(iv);
-    const diff = price - p;
-    if (Math.abs(diff) <= tol * (1 + p)) return Math.max(iv, 0);
-
-    const v = vega(F, K, T, iv, df);
-    if (v > 1e-12) {
-      const step = diff / v;
-      const cand = iv - step;
-      if (cand > ivLo && cand < ivHi && Number.isFinite(cand)) {
-        iv = cand;
-        continue;
-      }
-    }
-    if (diff > 0) ivHi = iv; else ivLo = iv;
-    iv = 0.5 * (ivLo + ivHi);
+  if (T <= 0 || vol <= 0) {
+    return Math.max(df * (forward - strike), 0);
   }
-  return Math.max(iv, 0);
+  const sigmaSqrtT = vol * Math.sqrt(T);
+  const d1 = (Math.log(forward / strike)) / sigmaSqrtT + 0.5 * sigmaSqrtT;
+  const d2 = d1 - sigmaSqrtT;
+  return df * (forward * cnd(d1) - strike * cnd(d2));
+}
+
+export function black76Put(
+  forward: number,
+  strike: number,
+  T: number,
+  vol: number,
+  df = 1.0
+): number {
+  const call = black76Call(forward, strike, T, vol, df);
+  return call - df * (forward - strike);
+}
+
+export function vegaForward(
+  forward: number,
+  strike: number,
+  T: number,
+  vol: number,
+  df = 1.0
+): number {
+  if (T <= 0 || vol <= 0) return 0;
+  const sigmaSqrtT = vol * Math.sqrt(T);
+  const d1 = (Math.log(forward / strike)) / sigmaSqrtT + 0.5 * sigmaSqrtT;
+  return df * forward * Math.sqrt(T) * pdf(d1);
+}
+
+export function impliedVolFromPrice(
+  isCall: boolean,
+  price: number,
+  forward: number,
+  strike: number,
+  T: number,
+  df = 1.0
+): number {
+  const intrinsic = Math.max(
+    df * (isCall ? forward - strike : strike - forward),
+    0
+  );
+  const tv = price - intrinsic;
+  if (tv <= 0) return 1e-6;
+
+  let lo = 1e-6, hi = 5.0;
+  const f = (sigma: number) =>
+    (isCall
+      ? black76Call(forward, strike, T, sigma, df)
+      : black76Put(forward, strike, T, sigma, df)) - price;
+
+  let flo = f(lo), fhi = f(hi);
+  
+  for (let i = 0; i < 20 && flo * fhi > 0; i++) {
+    if (fhi < 0) hi *= 2; else lo /= 2;
+    flo = f(lo); fhi = f(hi);
+    if (hi > 10 || lo < 1e-12) break;
+  }
+
+  let mid = 0;
+  for (let i = 0; i < 60; i++) {
+    mid = 0.5 * (lo + hi);
+    const fm = f(mid);
+    if (Math.abs(fm) < 1e-10) break;
+    if (flo * fm <= 0) { hi = mid; fhi = fm; } 
+    else { lo = mid; flo = fm; }
+  }
+
+  let sigma = mid;
+  for (let i = 0; i < 10; i++) {
+    const priceAtSigma = isCall
+      ? black76Call(forward, strike, T, sigma, df)
+      : black76Put(forward, strike, T, sigma, df);
+    const diff = priceAtSigma - price;
+    const veg = vegaForward(forward, strike, T, sigma, df);
+    if (Math.abs(diff) < 1e-12 || veg === 0) break;
+    sigma = Math.max(1e-9, sigma - diff / veg);
+  }
+
+  return Math.max(1e-9, Math.min(sigma, 10));
 }

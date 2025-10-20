@@ -1,110 +1,39 @@
-/**
- * Config Manager - Runtime Configuration
- * 
- * Manages production config + strategy profiles
- * Allows runtime profile switching
- */
+import fs from "fs";
+import YAML from "yaml";
+import { AppConfigSchema, AppConfig } from "./schema";
 
-import { ProductionConfig, loadConfigFromEnv } from './productionConfig';
-import { StrategyProfile, selectProfile, getProfile } from './strategyProfiles';
-
-export class ConfigManager {
-  private prodConfig: ProductionConfig;
-  private activeProfiles: Map<string, StrategyProfile> = new Map();
-  private defaultProfileName: string = 'default';
-
-  constructor(prodConfig?: ProductionConfig) {
-    this.prodConfig = prodConfig || loadConfigFromEnv();
-  }
-
-  /**
-   * Get production config
-   */
-  getProductionConfig(): ProductionConfig {
-    return this.prodConfig;
-  }
-
-  /**
-   * Get or select strategy profile for instrument
-   */
-  getStrategyProfile(params: {
-    instrumentId: string;
-    strike: number;
-    forward: number;
-    T: number;
-    iv: number;
-    rvZ?: number;
-    forceProfile?: string;
-  }): StrategyProfile {
-    const { instrumentId, forceProfile } = params;
-
-    // Check if profile is cached
-    if (this.activeProfiles.has(instrumentId)) {
-      return this.activeProfiles.get(instrumentId)!;
+function deepFreeze<T>(obj: T): T {
+  Object.freeze(obj);
+  Object.getOwnPropertyNames(obj).forEach((prop) => {
+    const val = (obj as any)[prop];
+    if (val && typeof val === "object" && !Object.isFrozen(val)) {
+      deepFreeze(val);
     }
-
-    // Use forced profile if specified
-    let profile: StrategyProfile;
-    if (forceProfile) {
-      profile = getProfile(forceProfile);
-    } else {
-      // Auto-select based on characteristics
-      profile = selectProfile(params);
-    }
-
-    // Cache it
-    this.activeProfiles.set(instrumentId, profile);
-    
-    return profile;
-  }
-
-  /**
-   * Override profile for specific instrument
-   */
-  setProfileForInstrument(instrumentId: string, profileName: string): void {
-    const profile = getProfile(profileName);
-    this.activeProfiles.set(instrumentId, profile);
-    console.log(`[ConfigManager] Set ${instrumentId} to profile: ${profileName}`);
-  }
-
-  /**
-   * Clear profile cache (forces re-selection)
-   */
-  clearProfileCache(): void {
-    this.activeProfiles.clear();
-  }
-
-  /**
-   * Get all active profiles (for monitoring)
-   */
-  getActiveProfiles(): Map<string, StrategyProfile> {
-    return new Map(this.activeProfiles);
-  }
-
-  /**
-   * Summary for logging
-   */
-  getSummary(): string {
-    return `ConfigManager: ${this.prodConfig.environment}/${this.prodConfig.product}/${this.prodConfig.venue}, ` +
-           `Alpha: ${this.prodConfig.enableAlpha}, ` +
-           `MMP: ${this.prodConfig.mmpEnabled}, ` +
-           `Active Profiles: ${this.activeProfiles.size}`;
-  }
+  });
+  return obj;
 }
 
-/**
- * Global singleton instance
- */
-let globalConfigManager: ConfigManager | null = null;
+let cached: AppConfig | null = null;
 
-export function getConfigManager(): ConfigManager {
-  if (!globalConfigManager) {
-    globalConfigManager = new ConfigManager();
-  }
-  return globalConfigManager;
+export function loadConfig(configPath = "config/default.yaml"): AppConfig {
+  if (cached) return cached;
+  const real = fs.existsSync(configPath)
+    ? configPath
+    : fs.existsSync("config.default.yaml")
+    ? "config.default.yaml"
+    : configPath;
+  const raw = fs.readFileSync(real, "utf-8");
+  const parsed = YAML.parse(raw);
+  const cfg = AppConfigSchema.parse(parsed);
+  cached = deepFreeze(cfg);
+  return cached;
 }
 
-export function initConfigManager(prodConfig?: ProductionConfig): ConfigManager {
-  globalConfigManager = new ConfigManager(prodConfig);
-  return globalConfigManager;
+export function resetConfigCache() {
+  cached = null;
+}
+
+// Legacy export for backward compat
+export function initConfigManager() {
+  return loadConfig();
 }
