@@ -1,6 +1,6 @@
 {
-  "timestamp": "2025-10-20T11:06:27.162Z",
-  "fixtureHash": "25d1a1cd626271184786183bee2b8ac24b891afe76db3340e06a58c6884ebd3f",
+  "timestamp": "2025-10-20T11:22:07.728Z",
+  "fixtureHash": "b67f8eee51cca249aa1439cc9f23e8b8399894525a69ba70326de2e6182c1494",
   "conventions": {
     "K_CONVENTION": "ln(K/F)",
     "SVI_FAMILY": "svi_raw",
@@ -27,7 +27,7 @@
   },
   "worstW": {
     "errorBps": 3.396276529753444e-12,
-    "fixture": 2,
+    "fixture": 1,
     "strike": 107000,
     "expected": 0.005107721532035382,
     "got": 0.005107721532035384,
@@ -45,13 +45,13 @@
     },
     {
       "fixture": 1,
-      "fixtureId": "btc_2025-01-03_7d_synthetic_30d",
+      "fixtureId": "btc_2025-01-03_7d_synthetic_14d",
       "valid": true,
       "errors": []
     },
     {
       "fixture": 2,
-      "fixtureId": "btc_2025-01-03_7d_synthetic_14d",
+      "fixtureId": "btc_2025-01-03_7d_synthetic_30d",
       "valid": true,
       "errors": []
     }

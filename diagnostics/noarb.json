@@ -1,5 +1,5 @@
 {
-  "timestamp": "2025-10-20T11:06:28.727Z",
+  "timestamp": "2025-10-20T11:22:09.328Z",
   "conventions": {
     "k": "ln(K/F)",
     "family": "svi_raw",
@@ -13,32 +13,12 @@
     "totalFixtures": 3,
     "passed": 3,
     "failed": 0,
-    "synthetic": 0,
+    "synthetic": 2,
     "fixtures": [
       {
         "fixtureId": "btc_2025-01-03_7d_result",
         "synthetic": false,
-        "passed": true,
-        "wingSlopes": {
-          "left": 0.056778908714860445,
-          "right": 0.022279781915397735,
-          "leftOK": true,
-          "rightOK": true
-        },
-        "violations": {
-          "varConvexity": 0,
-          "butterflies": 0,
-          "callConvexity": 0
-        },
-        "margins": {
-          "minVarConvexity": null,
-          "minCallConvexity": null,
-          "minButterfly": 0.000001122559387119193
-        }
-      },
-      {
-        "fixtureId": "btc_2025-01-03_7d_synthetic_30d",
-        "synthetic": false,
+        "tenorDays": null,
         "passed": true,
         "wingSlopes": {
           "left": 0.056778908714860445,
@@ -59,7 +39,30 @@
       },
       {
         "fixtureId": "btc_2025-01-03_7d_synthetic_14d",
-        "synthetic": false,
+        "synthetic": true,
+        "tenorDays": 14,
+        "passed": true,
+        "wingSlopes": {
+          "left": 0.056778908714860445,
+          "right": 0.022279781915397735,
+          "leftOK": true,
+          "rightOK": true
+        },
+        "violations": {
+          "varConvexity": 0,
+          "butterflies": 0,
+          "callConvexity": 0
+        },
+        "margins": {
+          "minVarConvexity": null,
+          "minCallConvexity": null,
+          "minButterfly": 0.000001122559387119193
+        }
+      },
+      {
+        "fixtureId": "btc_2025-01-03_7d_synthetic_30d",
+        "synthetic": true,
+        "tenorDays": 30,
         "passed": true,
         "wingSlopes": {
           "left": 0.056778908714860445,
@@ -91,7 +94,7 @@
         "T2": 0.038356164383561646,
         "violations": 0,
         "minMargin": 0,
-        "minMarginK": -2.5,
+        "minMarginK": -2.4,
         "minMarginBps": 0
       },
       {
@@ -101,7 +104,7 @@
         "T2": 0.0821917808219178,
         "violations": 0,
         "minMargin": 0,
-        "minMarginK": -2.5,
+        "minMarginK": -2.4,
         "minMarginBps": 0
       }
     ]

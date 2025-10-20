@@ -22,22 +22,23 @@ describe("Static No-Arb Guards", () => {
       it(`Fixture ${idx}: ${label} - no static arb`, () => {
         const r = checkStaticArbitrage(f.strikes, f.forward, f.T, f.svi);
         
-        // Compute min-margins (health metrics)
-        const minVarConvexity = r.varConvexity.length > 0 
+        // Compute min-margins from check results
+        const minVarConvexity = r.varConvexity.length > 0
           ? Math.min(...r.varConvexity.map(v => v.d2w))
-          : r.varConvexity.length === 0 ? Infinity : 0;
+          : null;
         
         const minCallConvexity = r.callConvexity.length > 0
           ? Math.min(...r.callConvexity.map(v => v.d2C))
-          : r.callConvexity.length === 0 ? Infinity : 0;
+          : null;
         
         const minButterfly = r.wButterflies.length > 0
           ? Math.min(...r.wButterflies.map(b => b.value))
-          : Infinity;
+          : null;
         
         results.push({
           fixtureId: f.fixtureId ?? `idx_${idx}`,
           synthetic: f.metadata?.synthetic ?? false,
+          tenorDays: f.metadata?.tenor_days ?? null,
           passed: r.passed,
           wingSlopes: r.wingSlopes,
           violations: {
@@ -46,28 +47,11 @@ describe("Static No-Arb Guards", () => {
             callConvexity: r.callConvexity.length,
           },
           margins: {
-            minVarConvexity: minVarConvexity === Infinity ? null : minVarConvexity,
-            minCallConvexity: minCallConvexity === Infinity ? null : minCallConvexity,
-            minButterfly: minButterfly === Infinity ? null : minButterfly,
+            minVarConvexity,
+            minCallConvexity,
+            minButterfly,
           }
         });
-        
-        if (!r.passed) {
-          console.log(`\n⚠️ Static arb violations in fixture ${idx}:`);
-          if (!r.wingSlopes.leftOK || !r.wingSlopes.rightOK) {
-            console.log("  Wing slopes:", r.wingSlopes);
-          }
-          if (r.varConvexity.length > 0) {
-            console.log(`  Variance convexity: ${r.varConvexity.length} violations (min d²w: ${minVarConvexity.toExponential(2)})`);
-          }
-          if (r.wButterflies.some(b => b.violates)) {
-            const count = r.wButterflies.filter(b => b.violates).length;
-            console.log(`  Butterflies: ${count} violations (min: ${minButterfly.toExponential(2)})`);
-          }
-          if (r.callConvexity.length > 0) {
-            console.log(`  Call convexity: ${r.callConvexity.length} violations (min d²C: ${minCallConvexity.toExponential(2)})`);
-          }
-        }
         
         expect(r.passed).toBe(true);
       });
@@ -79,8 +63,10 @@ describe("Static No-Arb Guards", () => {
       it.skip("Need ≥2 expiries for calendar check", () => {});
     } else {
       const sorted = [...agg.fixtures].sort((a, b) => a.T - b.T);
+      
+      // DETERMINISTIC k-grid: integer steps avoid float accumulation
       const kGrid: number[] = [];
-      for (let k = -2.5; k <= 2.5; k += 0.1) kGrid.push(k);
+      for (let i = -24; i <= 24; i++) kGrid.push(i / 10);
       
       for (let i = 0; i < sorted.length - 1; i++) {
         const f1 = sorted[i];
@@ -93,17 +79,20 @@ describe("Static No-Arb Guards", () => {
             kGrid
           );
           
-          // Compute min calendar margin (w2-w1) across k-grid
+          // Compute min calendar margin with correct relative bps
           let minMargin = Infinity;
           let minMarginK = 0;
+          let minMarginRelBps: number | null = null;
           
           for (const k of kGrid) {
             const w1 = sviTotalVariance(asKRel(k), f1.svi);
             const w2 = sviTotalVariance(asKRel(k), f2.svi);
             const margin = w2 - w1;
+            
             if (margin < minMargin) {
               minMargin = margin;
               minMarginK = k;
+              minMarginRelBps = Math.abs(margin) / Math.max(1e-10, Math.abs(w1)) * 1e4;
             }
           }
           
@@ -113,17 +102,14 @@ describe("Static No-Arb Guards", () => {
             T1: f1.T,
             T2: f2.T,
             violations: violations.length,
-            minMargin: minMargin,
+            minMargin: minMargin === Infinity ? null : minMargin,
             minMarginK: minMarginK,
-            minMarginBps: (minMargin / Math.max(1e-10, Math.abs(minMargin))) * 1e4,
+            minMarginBps: minMargin === Infinity ? null : minMarginRelBps,
           });
           
           if (violations.length > 0) {
             console.log(`\n⚠️ Calendar violations (${violations.length}):`);
-            console.log(`  Min margin: ${minMargin.toExponential(3)} at k=${minMarginK.toFixed(2)}`);
-            violations.slice(0, 3).forEach(v => {
-              console.log(`    k=${v.k.toFixed(2)}: w1=${v.w1.toFixed(6)}, w2=${v.w2.toFixed(6)}`);
-            });
+            console.log(`  Min margin: ${minMargin.toExponential(3)} at k=${minMarginK.toFixed(2)} (${minMarginRelBps?.toFixed(2)} bp)`);
           }
           
           expect(violations.length).toBe(0);
