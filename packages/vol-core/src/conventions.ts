@@ -24,3 +24,6 @@ export function kRel(F: number, K: number): KRel {
 export function isValidKRel(k: number): boolean {
   return Number.isFinite(k);
 }
+
+// Helper: convert raw ln(K/F) to branded KRel
+export const asKRel = (k: number): KRel => k as KRel;

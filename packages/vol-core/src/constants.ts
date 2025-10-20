@@ -1,17 +1,20 @@
-// Tolerance constants - centralized to avoid drift
+export const EPS_TV = 1e-12;
+export const EPS_T  = 1e-12;
+export const EPS_W_ABS = 1e-10;
 
-export const EPS_TV = 1e-12;           // Minimum total variance
-export const EPS_T = 1e-12;            // Minimum year fraction
-export const EPS_W_ABS = 1e-8;         // Absolute tolerance for w
-export const EPS_CONVEXITY = 1e-6;     // Convexity violation threshold
+// NO-ARB tolerances (crypto-friendly; tighten later if desired)
+export const CONVEXITY_TOL = 3e-6;
+export const BUTTERFLY_TOL = 1e-8;
+export const CAL_W_REL_BPS = 2.0;
 
-// IV tolerance (vol-bp)
-export const IV_TOL_MIN_BPS = 0.5;     // Minimum tolerance
-export const IV_TOL_MAX_BPS = 5.0;     // Maximum tolerance (capped)
-export const IV_TOL_PCT = 0.02;        // 2% adaptive component
+// IV tolerance (vol-bp) used elsewhere
+export const IV_TOL_MIN_BPS = 0.5;
+export const IV_TOL_MAX_BPS = 5.0;
+export const IV_TOL_PCT     = 0.02;
 
 // W tolerance (bp)
-export const W_TOL_REL_BPS = 5.0;      // 0.5 bp = 5 in 1e4 units
+export const W_TOL_REL_BPS = 5.0;
 
-// Lee bounds
+// Lee bound on wing slopes
 export const MAX_WING_SLOPE = 2.0;
+export const EPS_CONVEXITY = CONVEXITY_TOL; // back-compat alias for smile.ts

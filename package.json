@@ -8,7 +8,9 @@
     "test:unit": "vitest run apps/server/tests/unit",
     "test:golden": "vitest run apps/server/tests/unit/cc_parity_glob.test.ts",
     "fixtures:python": "bash scripts/gen-python-fixtures.sh",
-    "ci:step2": "npm run fixtures:python && npm run test:golden"
+    "ci:step2": "npm run fixtures:python && npm run test:golden",
+    "test:noarb": "vitest run apps/server/tests/unit/noArb.test.ts",
+    "ci:step3": "npm run fixtures:python && npm run test:golden && npm run test:noarb"
   },
   "devDependencies": {
     "@types/node": "^22.7.4",

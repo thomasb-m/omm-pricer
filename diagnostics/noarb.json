@@ -1,0 +1,21 @@
+{
+  "timestamp": "2025-10-20T10:48:34.193Z",
+  "fixtures": [
+    {
+      "fixtureId": "btc_2025-01-03_7d_result",
+      "passed": true,
+      "wingSlopes": {
+        "left": 0.056778908714860445,
+        "right": 0.022279781915397735,
+        "leftOK": true,
+        "rightOK": true
+      },
+      "varConvexityCount": 0,
+      "butterflyCount": 0,
+      "callConvexityCount": 0
+    }
+  ],
+  "totalFixtures": 1,
+  "passed": 1,
+  "failed": 0
+}
