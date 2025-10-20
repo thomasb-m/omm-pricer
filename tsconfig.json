@@ -9,11 +9,26 @@
     "resolveJsonModule": true,
     "baseUrl": ".",
     "paths": {
-      "@core-types": ["packages/core-types/src/index.ts"],
-      "@vol-core/*": ["packages/vol-core/src/*"],
-      "@vol-validation/*": ["packages/vol-validation/src/*"]
+      "@core-types": [
+        "packages/core-types/src/index.ts"
+      ],
+      "@vol-core/*": [
+        "packages/vol-core/src/*"
+      ],
+      "@vol-validation/*": [
+        "packages/vol-validation/src/*"
+      ],
+      "@pc-fit/*": [
+        "packages/pc-fit/src/*"
+      ],
+      "@svi-core/*": [
+        "packages/svi-core/src/*"
+      ]
     },
-    "types": ["node", "vitest/globals"]
+    "types": [
+      "node",
+      "vitest/globals"
+    ]
   },
   "include": [
     "packages/**/*",
