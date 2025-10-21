@@ -1,4 +1,5 @@
 features:
+  usePCFit: false
   enablePricing: true
   enableFitter: false
   enableShadow: false
@@ -59,3 +60,4 @@ risk:
 quoting:
   baseWidthTicks: 2
   baseSizeUnits: 1
+

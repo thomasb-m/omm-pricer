@@ -738,56 +738,6 @@ if (meaningfulCorrections < 0.2 * targetY.length) {
 
     // --- SIMPLE 1D LEVEL FIT (price-space) with ATM taper & OTM floor ---
 
-// Controls (safe defaults)
-const taperBand = 0.25;           // blend fully at ATM, taper to 0 by |k|=0.25
-const strongTVTicks = 5;          // only fully trust legs with CC TV >= 5 ticks
-const weakLegWeight = 0.10;       // downweight tiny-TV legs (floor-y quotes)
-const minTVTicks = 2;             // never let PC TV fall below 2 ticks
-const minTVFracOfCC = 0.50;       // never cut CC TV by more than 50%
-
-// Precompute |k| and CC TV per leg, build weights with taper
-const F_forWeights = Math.max(forward, 1e-9);
-const kAbs: number[] = [];
-const ccTvPerLeg: number[] = [];
-const wTap: number[] = [];
-const wStrong: number[] = [];
-for (let i = 0; i < legs.length; i++) {
-  const k = Math.log(legs[i].strike / F_forWeights);
-  kAbs[i] = Math.abs(k);
-  wTap[i] = Math.max(0, 1 - kAbs[i] / taperBand); // 1 at ATM → 0 by |k|=taperBand
-  ccTvPerLeg[i] = ccTV[i];
-  const strong = ccTV[i] >= strongTVTicks * tick;
-  wStrong[i] = strong ? 1 : weakLegWeight;
-}
-
-// Weighted mean residual within the band, ignoring invalid legs
-const ws = legs.map((l, i) => (validLegs[i] ? ((l.weight ?? 1) * wTap[i] * wStrong[i]) : 0));
-const wSum = ws.reduce((a, b) => a + b, 0) || 1;
-let thetaLevel = targetY.reduce((s, r, i) => s + ws[i] * r, 0) / wSum;
-
-// ✅ HARD ATM PIN: Force ATM leg to match market exactly
-if (atmIdx >= 0 && validLegs[atmIdx]) {
-  const atmResidual = targetY[atmIdx];
-  console.log(`[fitPCForExpiry] ATM hard pin: shifting theta by ${atmResidual.toFixed(8)} to zero ATM residual at K=${legs[atmIdx].strike}`);
-  
-  // Override theta to make ATM residual exactly zero
-  thetaLevel = atmResidual;
-}
-// Build pcTV = ccTV + theta * taper, with a soft floor
-const pcTV = new Map<number, number>();
-for (let i = 0; i < legs.length; i++) {
-  if (!validLegs[i]) continue;
-
-  // Apply less shift away from ATM
-  const raw = ccTvPerLeg[i] + thetaLevel * wTap[i];
-
-  // Soft floor: at least max(2*tick, 50% of CC TV)
-  const floorTV = Math.max(minTVTicks * tick, minTVFracOfCC * ccTvPerLeg[i]);
-
-  const tv = Math.max(raw, floorTV);
-  pcTV.set(legs[i].strike, tv);
-}
-
 // Cache as TVs (not full prices)
 this.pcFitCache.set(expiryMs, {
   theta: [thetaLevel],
