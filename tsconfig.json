@@ -1,74 +1,21 @@
 {
+  "extends": "./tsconfig.base.json",
   "compilerOptions": {
-    "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "resolveJsonModule": true,
     "baseUrl": ".",
     "paths": {
-      "@core-types": [
-        "packages/core-types/src/index"
-      ],
-      "@vol-core/*": [
-        "packages/vol-core/src/*"
-      ],
-      "risk-core/*": [
-        "packages/risk-core/src/*"
-      ],
-      "pc-fit/*": [
-        "packages/pc-fit/src/*"
-      ]
-    },
-    "types": [
-      "node",
-      "vitest/globals",
-      "undici-types",
-      "vitest"
-    ]
+      "@core-types": ["packages/core-types/src/index"],
+      "@vol-core/*": ["packages/vol-core/src/*"],
+      "@vol-validation/*": ["packages/vol-core-validation/src/*"],
+      "risk-core/*": ["packages/risk-core/src/*"],
+      "pc-fit/*": ["packages/pc-fit/src/*"]
+    }
   },
-  "include": [
-    "packages/**/*",
-    "apps/server/src/config/**/*",
-    "apps/server/src/pricing/**/*",
-    "apps/server/tests/**/*"
-  ],
-  "exclude": [
-    "node_modules",
-    "dist",
-    "build",
-    "apps/server/apps/**",
-    "apps/server/src/__tests__/**",
-    "apps/server/src/api/**",
-    "apps/server/src/calibration/**",
-    "apps/server/src/engine/**",
-    "apps/server/src/ingest.ts",
-    "apps/server/src/replay/**",
-    "apps/server/src/scripts/**",
-    "apps/server/src/test-*.ts",
-    "apps/server/src/tools/**",
-    "apps/server/src/volModels/**",
-    "src/**"
-  ],
   "files": [],
   "references": [
-    {
-      "path": "packages/core-types"
-    },
-    {
-      "path": "packages/vol-core"
-    },
-    {
-      "path": "packages/risk-core"
-    },
-    {
-      "path": "packages/pc-fit"
-    },
-    {
-      "path": "apps/server"
-    }
-  ],
-  "extends": "./tsconfig.base.json"
+    { "path": "packages/core-types" },
+    { "path": "packages/vol-core" },
+    { "path": "packages/risk-core" },
+    { "path": "packages/pc-fit" },
+    { "path": "apps/server" }
+  ]
 }

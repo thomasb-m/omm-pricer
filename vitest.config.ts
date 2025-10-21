@@ -1,34 +1,24 @@
 import { defineConfig } from 'vitest/config';
-import path from 'node:path';
-import fs from 'node:fs';
-
-const tsconfigPath = path.resolve(process.cwd(), 'tsconfig.json');
-
-function loadAliases() {
-  try {
-    const ts = JSON.parse(fs.readFileSync(tsconfigPath, 'utf8'));
-    const paths = ts?.compilerOptions?.paths ?? {};
-    return Object.entries(paths).map(([key, value]) => {
-      const find = key.replace(/\/\*$/, '');
-      const first = Array.isArray(value) ? value[0] : value;
-      const target = first.replace(/\/\*$/, '');
-      return { find, replacement: path.resolve(process.cwd(), target) };
-    });
-  } catch {
-    return [];
-  }
-}
+import path from 'path';
 
 export default defineConfig({
-  css: { postcss: {} },
-  resolve: { alias: loadAliases() },
+  resolve: {
+    alias: {
+      '@vol-core': path.resolve(__dirname, 'packages/vol-core/src'),
+      '@vol-validation': path.resolve(__dirname, 'packages/vol-validation/src'),
+      '@core-types': path.resolve(__dirname, 'packages/core-types/src'),
+      'risk-core': path.resolve(__dirname, 'packages/risk-core/src'),
+      'pc-fit': path.resolve(__dirname, 'packages/pc-fit/src'),
+    }
+  },
   test: {
-    environment: 'node',
     globals: true,
-    include: [
-      'packages/**/tests/**/*.{test,spec}.ts',
-      'apps/**/?(src|tests)/**/*.{test,spec}.{ts,js}'
-    ],
-    exclude: ['.tmp/**','dist/**','node_modules/**'],
+    environment: 'node',
+    exclude: [
+      '**/node_modules/**',
+      '**/dist/**',
+      '**/.tmp/**',
+      '**/verify/**'
+    ]
   },
 });
