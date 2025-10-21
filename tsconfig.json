@@ -2,7 +2,7 @@
   "compilerOptions": {
     "target": "ES2022",
     "module": "ES2022",
-    "moduleResolution": "Bundler",
+    "moduleResolution": "nodenext",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
@@ -10,7 +10,7 @@
     "baseUrl": ".",
     "paths": {
       "@core-types": [
-        "packages/core-types/src/index.ts"
+        "packages/core-types/src/index"
       ],
       "@vol-core/*": [
         "packages/vol-core/src/*"
@@ -23,11 +23,15 @@
       ],
       "@svi-core/*": [
         "packages/svi-core/src/*"
+      ],
+      "@risk-core/*": [
+        "packages/risk-core/src/*"
       ]
     },
     "types": [
       "node",
-      "vitest/globals"
+      "vitest/globals",
+      "node"
     ]
   },
   "include": [
@@ -52,5 +56,23 @@
     "apps/server/src/tools/**",
     "apps/server/src/volModels/**",
     "src/**"
+  ],
+  "files": [],
+  "references": [
+    {
+      "path": "apps/server"
+    },
+    {
+      "path": "packages/core-types"
+    },
+    {
+      "path": "packages/pc-fit"
+    },
+    {
+      "path": "packages/risk-core"
+    },
+    {
+      "path": "packages/vol-core"
+    }
   ]
 }

@@ -6,7 +6,9 @@
     "rootDir": "src",
     "strict": true,
     "module": "esnext",
-    "target": "es2022"
+    "target": "es2022",
+    "skipLibCheck": true,
+    "moduleResolution": "nodenext"
   },
   "include": ["src"],
   "exclude": ["tests", "**/*.test.ts"]

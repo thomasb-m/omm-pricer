@@ -8,6 +8,5 @@
     "module": "esnext",
     "target": "es2022"
   },
-  "include": ["src"],
-  "exclude": ["tests", "**/*.test.ts"]
+  "include": ["src"]
 }
