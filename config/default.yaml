@@ -1,8 +1,8 @@
 features:
-  usePCFit: false
+  usePCFit: true
   enablePricing: true
+  enableShadow: true
   enableFitter: false
-  enableShadow: false
 
 markets:
   btc:

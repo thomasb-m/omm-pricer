@@ -1,32 +1,21 @@
 {
   "name": "@pc-fit/kit",
   "version": "1.0.0",
-  "private": true,
   "type": "module",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    },
-    "./fit": {
-      "types": "./dist/fit/index.d.ts",
-      "default": "./dist/fit/index.js"
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
     }
-  },
-  "engines": {
-    "node": ">=18.0.0"
   },
   "scripts": {
     "build": "tsc -b",
-    "pretest": "tsc -b",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "test": "vitest"
   },
   "devDependencies": {
-    "vite": "^5.4.0",
-    "vitest": "^2.1.8",
-    "typescript": "^5.6.0"
+    "vitest": "^2.1.5"
   }
 }

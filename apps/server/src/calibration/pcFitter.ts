@@ -1,10 +1,8 @@
 import {
-  baseWeights,
-  wlsFitConvexTV,
-  applyTrimBps,
-  huberWeights,
-  convexRepair,
-} from 'pc-fit';
+  fitConvexTV,
+  sanitizeLegs,
+  type FitOptions,
+} from '@pc-fit/kit';
 
 export type PCFitResult = {
   K: number[];
@@ -15,28 +13,58 @@ export type PCFitResult = {
 
 /** Minimal adapter: robust WLS + convex repair, hardcoded defaults */
 export function fitPCSmile(
-  legs: Array<{ K: number; marketMid: number; vega?: number; phi?: number }>,
-  F: number,
-  T: number
+  legs: Array<{ K: number; marketMid: number; weight?: number; vega?: number }>,
+  ccTV: number[],
+  phi: number[],
+  forward: number,
+  options: Pick<FitOptions, 'minTick' | 'minTVTicks' | 'minTVFracOfCC'> &
+    Partial<Omit<FitOptions, 'minTick' | 'minTVTicks' | 'minTVFracOfCC'>>
 ): PCFitResult {
-  const K    = legs.map(l => l.K);
-  const mid  = legs.map(l => Math.max(l.marketMid, 0));
-  const vega = legs.map(l => Math.max(l.vega ?? 1, 1));
-  const phi  = legs.map(l => l.phi ?? 0);
+  if (legs.length !== ccTV.length || legs.length !== phi.length) {
+    throw new Error('fitPCSmile: legs, ccTV, and phi arrays must have matching lengths');
+  }
 
-  const prelim = applyTrimBps(mid, 25);
-  const w0 = baseWeights(vega);
-  const floorVec = K.map(() => 0);
-  const loss = (r: number[]) => huberWeights(r, 1.5);
+  const fitLegs = legs.map(leg => ({
+    strike: leg.K,
+    marketMid: Math.max(leg.marketMid, 0),
+    weight: leg.weight,
+    vega: leg.vega,
+  }));
 
-  const { tv, theta, rmse } = wlsFitConvexTV({
-    K, mid, F, T, w0, floorVec, phi,
-    lossWeights: loss,
-    convexityPenalty: 1e-3,
-    maxIter: 6,
-    prelim,
+  const defaultedOptions: FitOptions = {
+    minTick: options.minTick,
+    minTVTicks: options.minTVTicks ?? 2,
+    minTVFracOfCC: options.minTVFracOfCC ?? 0.5,
+    applyTickFloorWithinBand: options.applyTickFloorWithinBand ?? true,
+    minTVAbsFloorTicks: options.minTVAbsFloorTicks ?? 1,
+    maxOutlierTrimBps: options.maxOutlierTrimBps ?? 150,
+    robustLoss: options.robustLoss ?? 'huber',
+    huberC: options.huberC ?? 1.5,
+    tukeyC: options.tukeyC,
+    enforceCallConvexity: options.enforceCallConvexity ?? true,
+    convexityTol: options.convexityTol ?? 1e-6,
+    taperBand: options.taperBand ?? 0.25,
+    taperExp: options.taperExp ?? 1.0,
+  };
+
+  const phiVec = phi.map(p => (p > 0 ? p : 0));
+
+  const sanitized = sanitizeLegs(fitLegs, forward);
+  const result = fitConvexTV({
+    legs: fitLegs,
+    forward,
+    ccTV,
+    phi: phiVec,
+    options: defaultedOptions,
   });
 
-  const tvConvex = convexRepair(K, tv, floorVec);
-  return { K, tv: tvConvex, theta, rmse };
+  const strikes = sanitized.legs.map(l => l.strike);
+  const rmse = (result.rmseBps ?? 0) * 1e-4;
+
+  return {
+    K: strikes,
+    tv: result.tvFitted,
+    theta: result.theta,
+    rmse,
+  };
 }

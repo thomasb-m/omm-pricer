@@ -710,6 +710,40 @@ if (meaningfulCorrections < 0.2 * targetY.length) {
     legs[i].weight = Math.min(wgt, 50.0);
   }
 
+  const validIndices = legs
+    .map((_, idx) => idx)
+    .filter(idx => validLegs[idx])
+    .sort((a, b) => legs[a].strike - legs[b].strike);
+
+  const robustLegs = validIndices.map(idx => {
+    const leg = legs[idx];
+    const weight = leg.weight ?? 0;
+    const positiveWeight = weight > 0 ? weight : undefined;
+    return {
+      K: leg.strike,
+      marketMid: leg.marketMid,
+      weight: positiveWeight,
+      vega: positiveWeight,
+    };
+  });
+
+  const robustCcTV = validIndices.map(idx => ccTV[idx]);
+  const robustPhi = validIndices.map(() => 1);
+  const robustOptions = {
+    minTick: tick,
+    minTVTicks: 2,
+    minTVFracOfCC: 0.5,
+    maxOutlierTrimBps: 200,
+    robustLoss: 'huber' as const,
+    huberC: 1.5,
+    enforceCallConvexity: true,
+    convexityTol: 1e-6,
+    taperBand: 0.25,
+    taperExp: 1.0,
+    minTVAbsFloorTicks: 1,
+    applyTickFloorWithinBand: true,
+  };
+
   // ✅ FIND ATM LEG: Find the leg closest to 50-delta (for later hard pin)
   let atmIdx = -1;
   let bestErr = 1e9;
@@ -740,7 +774,7 @@ if (meaningfulCorrections < 0.2 * targetY.length) {
     // --- SIMPLE 1D LEVEL FIT (price-space) with ATM taper & OTM floor ---
     // --- PC FIT: Simple (baseline) vs Robust (Huber IRLS) ---
     
-    const enableShadow = this.config.features?.enableShadow ?? false;
+    const enableShadow = (process.env.ENABLE_SHADOW ?? "false").toLowerCase() === "true";
     const usePCFit = this.config.features?.usePCFit ?? false;
     
     let thetaLevel: number;
@@ -749,17 +783,15 @@ if (meaningfulCorrections < 0.2 * targetY.length) {
     let wSum: number;
     
     if (enableShadow) {
+      console.log("[SHADOW] enableShadow=true, entering shadow mode...");
       // Run both, compare, use simple
       const simple = this.fitPCSimple(legs, forward, T, ccTV, validLegs, targetY, tick);
       
       try {
-        const robustLegs = legs.filter((_, i) => validLegs[i]).map(l => ({
-          K: l.strike,
-          marketMid: l.marketMid,
-          vega: l.weight,
-          phi: 0
-        }));
-        const robust = fitPCSmile(robustLegs, forward, T);
+        if (robustLegs.length === 0) {
+          throw new Error('No robust legs available for PC fit');
+        }
+        const robust = fitPCSmile(robustLegs, robustCcTV, robustPhi, forward, robustOptions);
         this.compareFits(expiryMs, simple, robust, legs);
       } catch (err) {
         console.error(`[SHADOW] Robust fit failed:`, err);
@@ -770,13 +802,10 @@ if (meaningfulCorrections < 0.2 * targetY.length) {
     } else if (usePCFit) {
       // Use robust only
       try {
-        const robustLegs = legs.filter((_, i) => validLegs[i]).map(l => ({
-          K: l.strike,
-          marketMid: l.marketMid,
-          vega: l.weight,
-          phi: 0
-        }));
-        const fit = fitPCSmile(robustLegs, forward, T);
+        if (robustLegs.length === 0) {
+          throw new Error('No robust legs available for PC fit');
+        }
+        const fit = fitPCSmile(robustLegs, robustCcTV, robustPhi, forward, robustOptions);
         
         pcTV = new Map();
         fit.K.forEach((k, i) => pcTV.set(k, fit.tv[i]));

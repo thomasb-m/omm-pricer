@@ -18,7 +18,7 @@ const ism = new IntegratedSmileModel('BTC');
 console.log('='.repeat(60));
 console.log('SHADOW MODE - FULL SMILE TEST');
 console.log('='.repeat(60));
-console.log('Config:', cm.getSummary());
+// console.log('Config:', cm.getSummary());
 console.log('Mode:', tc.getMode().mode);
 console.log();
 
