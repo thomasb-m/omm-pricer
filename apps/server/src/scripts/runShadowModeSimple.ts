@@ -9,6 +9,8 @@ import WebSocket from 'ws';
 import { IntegratedSmileModel } from '../volModels/integratedSmileModel';
 import { initConfigManager } from '../config/configManager';
 import { initTradingController } from '../config/tradingController';
+import { safeMid, toUSD } from '../utils/units';
+import { getMarketSpec } from '../markets/index';
 
 // Initialize
 const cm = initConfigManager();
@@ -30,7 +32,15 @@ const EXPIRY_DATE = '24OCT25';  // ~1 week from now
 const EXPIRY_MS = new Date('2025-10-24').getTime();
 
 // Track market data
-const marketData = new Map<number, { iv: number, mid: number, bid: number, ask: number }>();
+const marketData = new Map<number, {
+  iv: number;
+  midNorm: number;
+  midUSD: number;
+  bidNorm?: number;
+  askNorm?: number;
+  bidUSD?: number;
+  askUSD?: number;
+}>();
 let spot = 100000;  // Will update from index
 let tickCount = 0;
 let calibrated = false;
@@ -47,6 +57,10 @@ const SUB_CHUNK = 40;
 let nextRpcId = 10;
 const pendingSubscribeBatches = new Map<number, { template: string; channels: string[] }>();
 const failedSubscriptions = new Set<string>();
+let lastSnapshotTick = 0;
+const SNAPSHOT_TICK_INTERVAL = 200;
+const marketSpec = getMarketSpec('BTC');
+const MARKET_TICK_NORM = marketSpec.minTick;
 
 function startFallbackTimer() {
   if (!fallbackTimer) {
@@ -145,6 +159,111 @@ function instrumentFromChannel(channel: string): string {
   return parts.length >= 3 ? parts[1] : channel;
 }
 
+function logModelVsMarketSnapshot(label: string) {
+  const strikes = Array.from(marketData.keys()).sort((a, b) => a - b);
+  if (strikes.length === 0) {
+    console.log(`[${label}] No market data cached yet, skipping snapshot.`);
+    return;
+  }
+
+  const rows: Array<{
+    strike: number;
+    marketMidNorm: number;
+    marketMidUSD: number;
+    marketBidNorm?: number;
+    marketAskNorm?: number;
+    marketBidUSD?: number;
+    marketAskUSD?: number;
+    modelMidNorm: number;
+    modelMidUSD: number;
+    modelBidNorm: number;
+    modelAskNorm: number;
+    modelBidUSD: number;
+    modelAskUSD: number;
+    ccMidNorm: number;
+    diffNorm: number;
+    diffBps: number;
+  }> = [];
+  const errors: string[] = [];
+
+  for (const strike of strikes) {
+    const data = marketData.get(strike);
+    if (!data) continue;
+
+    try {
+      const quote = ism.getQuote(
+        EXPIRY_MS,
+        strike,
+        spot,
+        'C',
+        data.iv,
+        Date.now()
+      );
+      const diff = quote.pcMid - data.midNorm;
+      const scale = Math.max(data.midNorm, 1e-4);
+      rows.push({
+        strike,
+        marketMidNorm: data.midNorm,
+        marketMidUSD: data.midUSD,
+        marketBidNorm: data.bidNorm,
+        marketAskNorm: data.askNorm,
+        marketBidUSD: data.bidUSD,
+        marketAskUSD: data.askUSD,
+        modelMidNorm: quote.pcMid,
+        modelMidUSD: toUSD(quote.pcMid, spot),
+        modelBidNorm: quote.bid,
+        modelAskNorm: quote.ask,
+        modelBidUSD: toUSD(quote.bid, spot),
+        modelAskUSD: toUSD(quote.ask, spot),
+        ccMidNorm: quote.ccMid,
+        diffNorm: diff,
+        diffBps: (diff / scale) * 1e4,
+      });
+    } catch (err: any) {
+      errors.push(`${strike}: ${err?.message ?? err}`);
+    }
+  }
+
+  if (rows.length === 0) {
+    console.log(`[${label}] Unable to price any strikes yet.`);
+    if (errors.length > 0) {
+      console.warn(`[${label}] Pricing errors encountered: ${errors.join('; ')}`);
+    }
+    return;
+  }
+
+  console.log(`\n[${label}] Model vs Market snapshot (${rows.length} strikes, tick ${tickCount})`);
+  const printable = rows.map((r) => ({
+    strike: r.strike,
+    market_mid_norm: r.marketMidNorm.toFixed(6),
+    market_mid_usd: r.marketMidUSD.toFixed(2),
+    market_bid_norm: r.marketBidNorm !== undefined ? r.marketBidNorm.toFixed(6) : '—',
+    market_ask_norm: r.marketAskNorm !== undefined ? r.marketAskNorm.toFixed(6) : '—',
+    market_bid_usd: r.marketBidUSD !== undefined ? r.marketBidUSD.toFixed(2) : '—',
+    market_ask_usd: r.marketAskUSD !== undefined ? r.marketAskUSD.toFixed(2) : '—',
+    model_mid_norm: r.modelMidNorm.toFixed(6),
+    model_mid_usd: r.modelMidUSD.toFixed(2),
+    model_bid_norm: r.modelBidNorm.toFixed(6),
+    model_ask_norm: r.modelAskNorm.toFixed(6),
+    model_bid_usd: r.modelBidUSD.toFixed(2),
+    model_ask_usd: r.modelAskUSD.toFixed(2),
+    cc_mid_norm: r.ccMidNorm.toFixed(6),
+    diff_norm: r.diffNorm.toFixed(6),
+    diff_bps: Number.isFinite(r.diffBps) ? r.diffBps.toFixed(1) : '—',
+  }));
+  console.table(printable);
+
+  const meanAbs = rows.reduce((acc, r) => acc + Math.abs(r.diffBps), 0) / rows.length;
+  const maxAbs = rows.reduce((acc, r) => Math.max(acc, Math.abs(r.diffBps)), 0);
+  console.log(
+    `  Avg |model-market| = ${meanAbs.toFixed(1)} bps, max = ${maxAbs.toFixed(1)} bps`
+  );
+
+  if (errors.length > 0) {
+    console.warn(`[${label}] ${errors.length} strikes failed to price: ${errors.slice(0, 5).join('; ')}`);
+  }
+}
+
 ws.on('open', () => {
   console.log('✅ Connected to Deribit\n');
   
@@ -212,6 +331,15 @@ ws.on('message', (data) => {
     pendingSubscribeNames = instruments.map((inst: any) => inst.instrument_name);
     subscribeTemplateIndex = 0;
     pendingSubscribeBatches.clear();
+    const strikes = instruments
+      .map((inst: any) => parseInt(inst.instrument_name.split('-')[2], 10))
+      .filter((n: number) => Number.isFinite(n))
+      .sort((a: number, b: number) => a - b);
+    if (strikes.length > 0) {
+      console.log(
+        `[universe] ${instruments.length} calls | strikes ${strikes[0]}–${strikes[strikes.length - 1]}`
+      );
+    }
     console.log(`📡 Preparing subscriptions for ${pendingSubscribeNames.length} instruments...\n`);
     requestNextSubscribeBatch();
   }
@@ -288,18 +416,37 @@ function handleTicker(channel: string, data: any) {
   const strike = parseInt(parts[2], 10);
   if (!Number.isFinite(strike)) return;
 
-  const markPrice = typeof data.mark_price === 'number' ? data.mark_price : null;
+  const markPrice = typeof data.mark_price === 'number' ? data.mark_price : undefined;
   const markIvPct = typeof data.mark_iv === 'number' ? data.mark_iv : null;
-  if (markPrice === null || markIvPct === null) return;
+  if (markIvPct === null) return;
 
-  const bestBid = typeof data.best_bid_price === 'number' ? data.best_bid_price : 0;
-  const bestAsk = typeof data.best_ask_price === 'number' ? data.best_ask_price : 0;
+  const bidUSD = typeof data.best_bid_price === 'number' ? data.best_bid_price : undefined;
+  const askUSD = typeof data.best_ask_price === 'number' ? data.best_ask_price : undefined;
+  const rawMid = safeMid(bidUSD, askUSD, markPrice);
+  if (rawMid === undefined || spot <= 0) return;
+
+  const midNorm = marketSpec.premiumConvention === 'QUOTE'
+    ? rawMid
+    : marketSpec.fromBaseToQuoted(rawMid, spot);
+  const bidNorm = bidUSD !== undefined
+    ? (marketSpec.premiumConvention === 'QUOTE' ? bidUSD : marketSpec.fromBaseToQuoted(bidUSD, spot))
+    : undefined;
+  const askNorm = askUSD !== undefined
+    ? (marketSpec.premiumConvention === 'QUOTE' ? askUSD : marketSpec.fromBaseToQuoted(askUSD, spot))
+    : undefined;
+
+  const midUSD = marketSpec.fromQuotedToBase(midNorm, spot);
+  const bidUSDConv = bidNorm !== undefined ? marketSpec.fromQuotedToBase(bidNorm, spot) : undefined;
+  const askUSDConv = askNorm !== undefined ? marketSpec.fromQuotedToBase(askNorm, spot) : undefined;
 
   marketData.set(strike, {
     iv: markIvPct / 100,
-    mid: markPrice,
-    bid: bestBid,
-    ask: bestAsk
+    midNorm,
+    midUSD,
+    bidNorm,
+    askNorm,
+    bidUSD: bidUSDConv,
+    askUSD: askUSDConv,
   });
 
   tickCount++;
@@ -318,14 +465,35 @@ function handleTicker(channel: string, data: any) {
 
   // Feed live updates back into the ISM once calibrated
   if (calibrated) {
-    const spread = Math.max(bestAsk - bestBid, 0.0005);
+    const spreadNorm = Math.max(
+      (askNorm !== undefined && bidNorm !== undefined) ? askNorm - bidNorm : 0,
+      MARKET_TICK_NORM
+    );
     const size = 1.0;
-    const tick = 0.0001;
     const weight = Math.min(
-      Math.max(size / Math.pow(Math.max(spread, tick), 2), 10),
+      Math.max(size / Math.pow(spreadNorm, 2), 10),
       3000
     );
-    ism.updateMarketData(EXPIRY_MS, strike, markPrice, spot, weight);
+    ism.updateMarketData(
+      EXPIRY_MS,
+      strike,
+      midNorm,
+      spot,
+      weight,
+      {
+        bid: bidNorm,
+        ask: askNorm,
+        midUSD,
+        bidUSD: bidUSDConv,
+        askUSD: askUSDConv,
+        denom: 'QUOTE',
+      }
+    );
+  }
+
+  if (calibrated && tickCount - lastSnapshotTick >= SNAPSHOT_TICK_INTERVAL) {
+    logModelVsMarketSnapshot(`Snapshot@${tickCount}`);
+    lastSnapshotTick = tickCount;
   }
 }
 
@@ -340,10 +508,10 @@ function attemptCalibration() {
   if (range < 40000) return;
 
   console.log(`\n🔧 Calibrating with ${marketData.size} strikes (${minStrike}-${maxStrike})...\n`);
-  const minTick = 0.0001;
+  const minTick = MARKET_TICK_NORM;
 
   const marketQuotes = Array.from(marketData.entries())
-    .filter(([, data]) => data.mid > 2 * minTick && data.iv > 0.05 && data.iv < 3.0)
+    .filter(([, data]) => data.midNorm > 2 * minTick && data.iv > 0.05 && data.iv < 3.0)
     .map(([strike, data]) => ({
       strike,
       iv: data.iv,
@@ -362,6 +530,8 @@ function attemptCalibration() {
     console.log('\n✅ Calibration complete! Now generating quotes...\n');
     resetStopTimer();
     logSampleQuote();
+    logModelVsMarketSnapshot('Initial calibration');
+    lastSnapshotTick = tickCount;
   } catch (err: any) {
     console.error('❌ Calibration failed:', err.message);
   }
@@ -386,8 +556,10 @@ function logSampleQuote() {
 
     const instName = `BTC-${EXPIRY_DATE}-${randomStrike}-C`;
     console.log(`[Tick ${tickCount}] ${instName}`);
-    console.log(`  Market: bid=${mktData.bid.toFixed(4)} ask=${mktData.ask.toFixed(4)} mid=${mktData.mid.toFixed(4)}`);
-    console.log(`  Model:  bid=${quote.bid.toFixed(4)} ask=${quote.ask.toFixed(4)} (${quote.bidSize} x ${quote.askSize})`);
+    console.log(`  Market (norm): bid=${(mktData.bidNorm ?? 0).toFixed(6)} ask=${(mktData.askNorm ?? 0).toFixed(6)} mid=${mktData.midNorm.toFixed(6)}`);
+    console.log(`  Market (USD):  ${mktData.midUSD.toFixed(2)} | bid=${(mktData.bidUSD ?? 0).toFixed(2)} ask=${(mktData.askUSD ?? 0).toFixed(2)}`);
+    console.log(`  Model (norm):  bid=${quote.bid.toFixed(6)} ask=${quote.ask.toFixed(6)} (${quote.bidSize} x ${quote.askSize})`);
+    console.log(`  Model (USD):   mid=${toUSD(quote.pcMid, spot).toFixed(2)}`);
     console.log(`  Edge:   ${(quote.edge * 10000).toFixed(2)} bps`);
     console.log();
   } catch (err: any) {

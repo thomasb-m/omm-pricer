@@ -37,6 +37,7 @@ import {
 import { fitPC } from '../calibration/fitPC';
 import { buildDeltaAnchoredBasis } from '../risk/factors/buildDeltaAnchoredBasis';
 import { getMarketSpec, clampQuoted } from '../markets/index';
+import { toNorm, toUSD } from '../utils/units';
 
 
 
@@ -345,8 +346,14 @@ export class IntegratedSmileModel {
   // Batch pricing: collect market data for fitting
   private marketDataCache = new Map<number, Array<{
     strike: number;
-    marketMid: number;
+    midNorm: number;
+    midUSD?: number;
+    bidNorm?: number;
+    askNorm?: number;
+    bidUSD?: number;
+    askUSD?: number;
     weight: number;
+    lastUpdateMs: number;
   }>>();
 
   // Debounced refit
@@ -529,14 +536,21 @@ export class IntegratedSmileModel {
     // Get ATM IV once for all strikes (simpler and more stable)
     const atmIV = this.marketIVs.get(expiryMs) ?? 0.65;
     
+    const sortedData = marketData
+      .slice()
+      .sort((a, b) => a.strike - b.strike);
+
     // ✅ BUILD LEGS: Simple structure
-    let legs = marketData.map(md => ({
+    let legs = sortedData.map(md => ({
       strike: md.strike,
       K: md.strike,
       T,
       F: forward,
       isCall: true,
-      marketMid: md.marketMid,
+      marketMid: md.midNorm,
+      marketMidUSD: md.midUSD ?? toUSD(md.midNorm, forward),
+      marketBid: md.bidNorm,
+      marketAsk: md.askNorm,
       weight: md.weight
     }));
     
@@ -560,22 +574,25 @@ export class IntegratedSmileModel {
 
 
     {
-      const F = Math.max(forward, 1e-6);
-    
       legs = legs.map((leg) => {
-        let m = leg.marketMid;
-    
-        // If someone fed base-currency (USD) by mistake, convert down to quoted:
-        // Heuristic: if premium looks way bigger than allowed quoted cap.
-        const cap = this.mkt.maxPremium ?? Number.POSITIVE_INFINITY;
-        if (m > cap && this.mkt.premiumConvention === 'QUOTE') {
-          m = this.mkt.fromBaseToQuoted(m, F);
+        let mid = leg.marketMid;
+        if (!Number.isFinite(mid) || mid <= 0) {
+          mid = this.mkt.minTick * 0.5;
         }
-    
-        if (!Number.isFinite(m) || m <= 0) m = this.mkt.minTick * 0.5;
-        m = clampQuoted(m, this.mkt);
-    
-        return { ...leg, marketMid: m };
+        mid = clampQuoted(Math.max(mid, this.mkt.minTick * 0.5), this.mkt);
+
+        const bid =
+          leg.marketBid !== undefined && leg.marketBid > 0 && leg.marketBid <= mid
+            ? clampQuoted(Math.max(leg.marketBid, this.mkt.minTick * 0.25), this.mkt)
+            : undefined;
+        const ask =
+          leg.marketAsk !== undefined && leg.marketAsk > 0 && leg.marketAsk >= mid
+            ? clampQuoted(Math.max(leg.marketAsk, this.mkt.minTick * 0.25), this.mkt)
+            : undefined;
+
+        const midUSD = leg.marketMidUSD ?? toUSD(mid, forward);
+
+        return { ...leg, marketMid: mid, marketBid: bid, marketAsk: ask, marketMidUSD: midUSD };
       });
     }
 
@@ -598,12 +615,20 @@ const F = Math.max(forward, 1e-9);
 const ccTV: number[] = [];
 const targetY: number[] = [];
 const validLegs: boolean[] = [];
+const deltas: number[] = [];
+const vegas: number[] = [];
+const marketTVs: number[] = [];
+const floorMask: boolean[] = [];
 
 legs.forEach((leg, idx) => {
   const k = Math.log(leg.strike / F);
   const wBase = Math.max(SVI.w(s.cc, k), tiny);
   const wTot = wBase + wON + wEvt;
   const iv = Math.sqrt(wTot / Math.max(T, 1e-12));
+  const greeks = black76Greeks(forward, leg.strike, Math.max(T, 1e-8), iv, leg.isCall, 1.0);
+  const absDelta = Math.min(Math.max(Math.abs(greeks.delta), 0), 1);
+  const moneyness = Math.min(absDelta, 1 - absDelta);
+  const isWing = moneyness < 0.05;
   
   // ✅ CC FULL PRICE: Use normalized Black (fraction of BTC)
   const ccFullPrice = blackFracPrice(F, leg.strike, T, iv, leg.isCall);
@@ -613,11 +638,21 @@ legs.forEach((leg, idx) => {
   
   // ✅ FILTER: Only reject if ACTUALLY at floor AND far OTM
   const isFloor = leg.marketMid <= 1.5 * tick;
-  const isFarOTM = Math.abs(Math.log(leg.strike / F)) > 0.25; // >25% out
+  const marketTimeValue = Math.max(leg.marketMid - intrinsic, 0);
+  const minUsefulTV = 5 * tick;
+  const isTinyTV = marketTimeValue < minUsefulTV;
+  const isWingLowTV = isWing && (isFloor || isTinyTV);
+  floorMask[idx] = isFloor;
+  marketTVs[idx] = marketTimeValue;
+  deltas[idx] = absDelta;
+  vegas[idx] = Math.max(Math.abs(greeks.vega), 1e-8);
   
-  if (isFloor && isFarOTM) {
+  if (isWingLowTV) {
+    const wingSide = absDelta > 0.5 ? 'deep ITM' : 'deep OTM';
     if (idx < 3) {
-      console.log(`[DEBUG] Strike ${leg.strike}: REJECTED (floor-tick mid=${leg.marketMid.toFixed(6)}, far OTM)`);
+      console.log(
+        `[DEBUG] Strike ${leg.strike}: EXCLUDED (wing=${wingSide}, Δ=${absDelta.toFixed(3)}, tv=${marketTimeValue.toExponential(3)}, floor=${isFloor})`
+      );
     }
     ccTV.push(0);
     targetY.push(0);
@@ -629,9 +664,6 @@ legs.forEach((leg, idx) => {
   // CC time value (dimensionless)
   const ccTimeValue = Math.max(ccFullPrice - intrinsic, 0);
   ccTV.push(ccTimeValue);
-  
-  // Market time value (dimensionless)
-  const marketTimeValue = Math.max(leg.marketMid - intrinsic, 0);
   
   // REGRESSION TARGET: residual TV that PC must explain
   const residual = marketTimeValue - ccTimeValue;
@@ -686,28 +718,23 @@ if (meaningfulCorrections < 0.2 * targetY.length) {
  
     this.logFitTable(expiryMs, forward, T, legs, ccTV);
    
-   // ✅ VEGA-WEIGHTED LEGS (only for valid legs)
+   // ✅ VEGA/ATM-WEIGHTED LEGS (only for valid legs)
    for (let i = 0; i < legs.length; i++) {
     if (!validLegs[i]) {
       legs[i].weight = 0;
       continue;
     }
     
-    const k = Math.log(legs[i].strike / F);
-    const w = Math.max(SVI.w(s.cc, k), tiny);
-    const iv = Math.sqrt(w / Math.max(T, 1e-8));
-    const greeks = black76Greeks(forward, legs[i].strike, Math.max(T, 1e-8), iv, legs[i].isCall, 1.0);
-    
-    // Vega-based weight
-    let wgt = Math.max(1e-6, Math.abs(greeks.vega));
-    
-    // Downweight if spread is wide (> 60% of mid)
-    // Note: We don't have bid/ask here, so this is a proxy
-    if (legs[i].marketMid <= 2 * tick) {
-      wgt *= 0.01;  // Nearly zero weight for near-floor
+    const mny = Math.min(deltas[i], 1 - deltas[i]); // 0 at wings, 0.5 ATM
+    const atmBias = Math.pow(mny / 0.5, 2); // emphasise ATM
+    let wgt = vegas[i] * atmBias;
+
+    if (legs[i].marketMid <= 2 * tick || !Number.isFinite(wgt) || wgt <= 0) {
+      legs[i].weight = 0;
+      continue;
     }
-    
-    legs[i].weight = Math.min(wgt, 50.0);
+
+    legs[i].weight = Math.min(Math.max(wgt, 1e-4), 10);
   }
 
   const validIndices = legs
@@ -824,6 +851,63 @@ if (meaningfulCorrections < 0.2 * targetY.length) {
       ({ theta: thetaLevel, pcTV, ws, wSum } = this.fitPCSimple(legs, forward, T, ccTV, validLegs, targetY, tick));
     }
 
+// Guardrail diagnostics: diff stats and ATM band
+const diffDiagnostics = legs.map((leg, idx) => {
+  const intrinsic = intrinsicFrac(F, leg.strike, leg.isCall);
+  const pcTVVal = pcTV.get(leg.strike) ?? 0;
+  const ccTVVal = ccTV[idx] ?? 0;
+  const marketTV = marketTVs[idx] ?? Math.max(leg.marketMid - intrinsic, 0);
+  const pcCall = intrinsic + pcTVVal;
+  const diff = pcCall - leg.marketMid;
+  const diffBps = Math.abs(diff) / Math.max(leg.marketMid, tick) * 1e4;
+  return {
+    idx,
+    strike: leg.strike,
+    delta: deltas[idx],
+    marketTV,
+    ccTV: ccTVVal,
+    pcTV: pcTVVal,
+    residual: pcTVVal - marketTV,
+    diffBps,
+    isFloor: floorMask[idx] || leg.marketMid <= 2 * tick,
+    valid: validLegs[idx],
+  };
+}).filter(row => Number.isFinite(row.diffBps));
+
+if (diffDiagnostics.length > 0) {
+  const avgAll = diffDiagnostics.reduce((sum, row) => sum + row.diffBps, 0) / diffDiagnostics.length;
+  const nonFloor = diffDiagnostics.filter(row => !row.isFloor);
+  const avgNoFloor = nonFloor.length > 0
+    ? nonFloor.reduce((sum, row) => sum + row.diffBps, 0) / nonFloor.length
+    : 0;
+  const maxNoFloor = nonFloor.length > 0
+    ? nonFloor.reduce((max, row) => Math.max(max, row.diffBps), 0)
+    : 0;
+
+  console.log(
+    `[fitPCForExpiry] diff_bps: avg_all=${avgAll.toFixed(1)}, avg_no_floor=${avgNoFloor.toFixed(1)}, max_no_floor=${maxNoFloor.toFixed(1)}`
+  );
+
+  const atmBand = nonFloor
+    .slice()
+    .sort((a, b) => Math.abs(a.delta - 0.5) - Math.abs(b.delta - 0.5))
+    .slice(0, Math.min(5, nonFloor.length));
+
+  if (atmBand.length > 0) {
+    console.log('[fitPCForExpiry] ATM band residuals:');
+    console.table(
+      atmBand.map(row => ({
+        strike: row.strike,
+        delta: row.delta.toFixed(3),
+        marketTV: row.marketTV.toFixed(6),
+        ccTV: row.ccTV.toFixed(6),
+        pcTV: row.pcTV.toFixed(6),
+        residual: row.residual.toFixed(6),
+      }))
+    );
+  }
+}
+
 // Cache as TVs (not full prices)
 this.pcFitCache.set(expiryMs, {
   theta: [thetaLevel],
@@ -849,15 +933,18 @@ if (atmIdx >= 0 && validLegs[atmIdx]) {
   const atmCCTV = ccTV[atmIdx];
   const atmMarketTV = Math.max(atmLeg.marketMid - atmIntrinsic, 0);
   const atmPCTV = pcTV.get(atmLeg.strike) ?? 0;
+  const atmMarketMidUSD = atmLeg.marketMidUSD ?? toUSD(atmLeg.marketMid, forward);
+  const ccCallUSD = toUSD(atmIntrinsic + atmCCTV, forward);
+  const pcCallUSD = toUSD(atmIntrinsic + atmPCTV, forward);
   
   const ccCall = atmIntrinsic + atmCCTV;
   const pcCall = atmIntrinsic + atmPCTV;
   const diffBps = (pcCall - atmLeg.marketMid) / Math.max(atmLeg.marketMid, tiny) * 10000;
   
   console.log(`[fitPCForExpiry] 🎯 ATM Check (K=${atmLeg.strike}):`);
-  console.log(`  Market: mid=${atmLeg.marketMid.toFixed(6)}, TV=${atmMarketTV.toFixed(6)}`);
-  console.log(`  CC(SVI): TV=${atmCCTV.toFixed(6)}, call=${ccCall.toFixed(6)}`);
-  console.log(`  PC(fit): TV=${atmPCTV.toFixed(6)}, call=${pcCall.toFixed(6)}`);
+  console.log(`  Market: mid=${atmLeg.marketMid.toFixed(6)} (${atmMarketMidUSD.toFixed(2)} USD), TV=${atmMarketTV.toFixed(6)}`);
+  console.log(`  CC(SVI): TV=${atmCCTV.toFixed(6)}, call=${ccCall.toFixed(6)} (${ccCallUSD.toFixed(2)} USD)`);
+  console.log(`  PC(fit): TV=${atmPCTV.toFixed(6)}, call=${pcCall.toFixed(6)} (${pcCallUSD.toFixed(2)} USD)`);
   console.log(`  Error: ${(pcCall - atmLeg.marketMid).toFixed(6)} (${diffBps.toFixed(1)} bps) ${Math.abs(diffBps) < 50 ? '✓' : '✗ FAILED'}`);
 }
 
@@ -890,7 +977,16 @@ console.log(`[fitPCForExpiry] ✅ Fitted expiry ${expiryMs}:`, {
     strike: number,
     marketMid: number,
     forward: number,
-    weight: number = 1.0
+    weight: number = 1.0,
+    opts: {
+      bid?: number;
+      ask?: number;
+      midUSD?: number;
+      bidUSD?: number;
+      askUSD?: number;
+      denom?: 'USD' | 'QUOTE';
+      timestampMs?: number;
+    } = {}
   ): void {
     if (!this.marketDataCache.has(expiryMs)) {
       this.marketDataCache.set(expiryMs, []);
@@ -899,17 +995,43 @@ console.log(`[fitPCForExpiry] ✅ Fitted expiry ${expiryMs}:`, {
   
     // Normalize to QUOTED units using market spec
     const F = Math.max(forward, 1e-6);
-    const cap = this.mkt.maxPremium ?? Number.POSITIVE_INFINITY;
-  
-    let midQuoted = marketMid;
-    // If the incoming value looks like base currency but we expect quoted, convert.
-    if (midQuoted > cap && this.mkt.premiumConvention === 'QUOTE') {
-      midQuoted = this.mkt.fromBaseToQuoted(midQuoted, F);
-    }
-    midQuoted = clampQuoted(midQuoted, this.mkt);
-  
+    const denom = opts.denom ?? this.mkt.premiumConvention;
+
+    const toQuoted = (value: number | undefined): number | undefined => {
+      if (value === undefined) return undefined;
+      const normalized = denom === 'USD'
+        ? this.mkt.fromBaseToQuoted(value, F)
+        : value;
+      return clampQuoted(Math.max(0, normalized), this.mkt);
+    };
+
+    const toBase = (value: number | undefined): number | undefined => {
+      if (value === undefined) return undefined;
+      return this.mkt.fromQuotedToBase(value, F);
+    };
+
+    const midNorm = toQuoted(marketMid);
+    if (midNorm === undefined) return;
+
+    const bidNorm = toQuoted(opts.bid);
+    const askNorm = toQuoted(opts.ask);
+
+    const midUSD = opts.midUSD ?? toBase(midNorm);
+    const bidUSD = opts.bidUSD ?? toBase(bidNorm);
+    const askUSD = opts.askUSD ?? toBase(askNorm);
+
     const i = cache.findIndex(md => md.strike === strike);
-    const rec = { strike, marketMid: midQuoted, weight };
+    const rec = {
+      strike,
+      midNorm,
+      midUSD: midUSD ?? toUSD(midNorm, F),
+      bidNorm,
+      askNorm,
+      bidUSD,
+      askUSD,
+      weight,
+      lastUpdateMs: opts.timestampMs ?? this.clockFn(),
+    };
     if (i >= 0) cache[i] = rec; else cache.push(rec);
   
     if (this.usePCFit) {
@@ -960,16 +1082,15 @@ console.log(`[fitPCForExpiry] ✅ Fitted expiry ${expiryMs}:`, {
     const range = maxStrike - minStrike;
     
     const minRangeRatio = 0.25; // need ~25% of F in strikes covered
-if ((range / Math.max(forward, 1e-6)) < minRangeRatio) {
-  console.log(`[scheduleRefit] Strike range too narrow (range=${range}, F=${forward}), waiting...`);
-  return;
-}
+    if ((range / Math.max(forward, 1e-6)) < minRangeRatio) {
+      console.log(`[scheduleRefit] Strike range too narrow (range=${range}, F=${forward}), waiting...`);
+      return;
+    }
     
     // ✅ CHECK 5: Validate prices are reasonable
     const badData = dataCache.filter(d =>
-      !Number.isFinite(d.marketMid) ||
-      d.marketMid <= 0 ||
-      (this.mkt.maxPremium !== undefined && d.marketMid > this.mkt.maxPremium) ||
+      !Number.isFinite(d.midNorm) ||
+      d.midNorm <= 0 ||
       d.weight <= 0 || !Number.isFinite(d.weight)
     );
     
@@ -1010,7 +1131,7 @@ private logFitTable(
   expiryMs: number,
   forward: number,
   T: number,
-  legs: Array<{ strike: number; marketMid: number; weight: number; isCall: boolean }>,
+  legs: Array<{ strike: number; marketMid: number; marketMidUSD?: number; marketBid?: number; marketAsk?: number; weight: number; isCall: boolean }>,
   ccTV: number[]
 ): void {
   try {
@@ -1030,10 +1151,14 @@ private logFitTable(
       const g = black76Greeks(forward, K, Math.max(T, 1e-8), Math.max(ivGuess, 1e-8), isCall, 1.0);
       const delta = g.delta;
 
+      const marketUSD = leg.marketMidUSD ?? toUSD(leg.marketMid, forward);
       return {
         strike: K,
         delta: Number(delta.toFixed(3)),
         marketMid: Number(leg.marketMid.toFixed(8)),
+        marketMidUSD: Number(marketUSD.toFixed(2)),
+        marketBid: leg.marketBid !== undefined ? Number(leg.marketBid.toFixed(8)) : undefined,
+        marketAsk: leg.marketAsk !== undefined ? Number(leg.marketAsk.toFixed(8)) : undefined,
         ccPrice: Number(ccTV[i].toFixed(8)),
         weight: Number(leg.weight.toFixed(2)),
         intrinsic: Number(intrinsicQ.toFixed(8)),
