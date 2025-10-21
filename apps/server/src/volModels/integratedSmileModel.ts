@@ -16,6 +16,7 @@ import { overnightMasses } from "../pricing/seasonality";
 import { eventMasses } from "../pricing/eventTable";
 import { timeToExpiryYears } from "../utils/time";
 import { calibrateSVI, MarketSmilePoint } from "./sviCalibration";
+import { fitPCSmile, type PCFitResult } from "../calibration/pcFitter";
 import { tauIntegral } from "../pricing/seasonality";
 import { factorGreeksFiniteDiff } from './factors/factorGreeks';
 
@@ -737,6 +738,62 @@ if (meaningfulCorrections < 0.2 * targetY.length) {
   }
 
     // --- SIMPLE 1D LEVEL FIT (price-space) with ATM taper & OTM floor ---
+    // --- PC FIT: Simple (baseline) vs Robust (Huber IRLS) ---
+    
+    const enableShadow = this.config.features?.enableShadow ?? false;
+    const usePCFit = this.config.features?.usePCFit ?? false;
+    
+    let thetaLevel: number;
+    let pcTV: Map<number, number>;
+    let ws: number[];
+    let wSum: number;
+    
+    if (enableShadow) {
+      // Run both, compare, use simple
+      const simple = this.fitPCSimple(legs, forward, T, ccTV, validLegs, targetY, tick);
+      
+      try {
+        const robustLegs = legs.filter((_, i) => validLegs[i]).map(l => ({
+          K: l.strike,
+          marketMid: l.marketMid,
+          vega: l.weight,
+          phi: 0
+        }));
+        const robust = fitPCSmile(robustLegs, forward, T);
+        this.compareFits(expiryMs, simple, robust, legs);
+      } catch (err) {
+        console.error(`[SHADOW] Robust fit failed:`, err);
+      }
+      
+      ({ theta: thetaLevel, pcTV, ws, wSum } = simple);
+      
+    } else if (usePCFit) {
+      // Use robust only
+      try {
+        const robustLegs = legs.filter((_, i) => validLegs[i]).map(l => ({
+          K: l.strike,
+          marketMid: l.marketMid,
+          vega: l.weight,
+          phi: 0
+        }));
+        const fit = fitPCSmile(robustLegs, forward, T);
+        
+        pcTV = new Map();
+        fit.K.forEach((k, i) => pcTV.set(k, fit.tv[i]));
+        thetaLevel = fit.theta;
+        ws = legs.map((l, i) => validLegs[i] ? (l.weight ?? 1) : 0);
+        wSum = ws.reduce((a, b) => a + b, 0) || 1;
+        
+        console.log(`[fitPCForExpiry] Robust: theta=${fit.theta.toFixed(8)}, rmse=${fit.rmse.toFixed(8)}`);
+      } catch (err) {
+        console.error(`[fitPCForExpiry] Robust failed, using simple:`, err);
+        ({ theta: thetaLevel, pcTV, ws, wSum } = this.fitPCSimple(legs, forward, T, ccTV, validLegs, targetY, tick));
+      }
+      
+    } else {
+      // Use simple only (default)
+      ({ theta: thetaLevel, pcTV, ws, wSum } = this.fitPCSimple(legs, forward, T, ccTV, validLegs, targetY, tick));
+    }
 
 // Cache as TVs (not full prices)
 this.pcFitCache.set(expiryMs, {
@@ -1784,5 +1841,89 @@ private logFitTable(
     this.inventoryController = new SmileInventoryController(this.config);
     this.factorInventory = [0, 0, 0, 0, 0, 0];
     this.version = 0;
+  }
+
+  /**
+   * Simple PC fit (baseline): weighted average with taper
+   */
+  private fitPCSimple(
+    legs: Array<{ strike: number; marketMid: number; weight: number; isCall: boolean }>,
+    forward: number,
+    T: number,
+    ccTV: number[],
+    validLegs: boolean[],
+    targetY: number[],
+    tick: number
+  ): { theta: number; pcTV: Map<number, number>; ws: number[]; wSum: number } {
+    
+    const F = Math.max(forward, 1e-9);
+    const taperBand = 0.25;
+    const minTVTicks = 2;
+    const minTVFracOfCC = 0.50;
+    
+    // Compute taper weights
+    const kAbs: number[] = [];
+    const wTap: number[] = [];
+    
+    for (let i = 0; i < legs.length; i++) {
+      const k = Math.log(legs[i].strike / F);
+      kAbs[i] = Math.abs(k);
+      wTap[i] = Math.max(0, 1 - kAbs[i] / taperBand);
+    }
+    
+    // Weighted mean residual
+    const ws = legs.map((l, i) => (validLegs[i] ? ((l.weight ?? 1) * wTap[i]) : 0));
+    const wSum = ws.reduce((a, b) => a + b, 0) || 1;
+    let thetaLevel = targetY.reduce((s, r, i) => s + ws[i] * r, 0) / wSum;
+    
+    // Build pcTV map
+    const pcTV = new Map<number, number>();
+    for (let i = 0; i < legs.length; i++) {
+      if (!validLegs[i]) continue;
+      
+      const raw = ccTV[i] + thetaLevel * wTap[i];
+      const floorTV = Math.max(minTVTicks * tick, minTVFracOfCC * ccTV[i]);
+      const tv = Math.max(raw, floorTV);
+      
+      pcTV.set(legs[i].strike, tv);
+    }
+    
+    return { theta: thetaLevel, pcTV, ws, wSum };
+  }
+  
+  /**
+   * Compare simple vs robust fit results
+   */
+  private compareFits(
+    expiryMs: number,
+    simple: { theta: number; pcTV: Map<number, number> },
+    robust: PCFitResult,
+    legs: Array<{ strike: number }>
+  ): void {
+    const robustMap = new Map<number, number>();
+    robust.K.forEach((k, i) => robustMap.set(k, robust.tv[i]));
+    
+    let maxDiff = 0;
+    let sumAbsDiff = 0;
+    let n = 0;
+    
+    for (const leg of legs) {
+      const simpleTV = simple.pcTV.get(leg.strike);
+      const robustTV = robustMap.get(leg.strike);
+      
+      if (simpleTV !== undefined && robustTV !== undefined) {
+        const diff = Math.abs(simpleTV - robustTV);
+        maxDiff = Math.max(maxDiff, diff);
+        sumAbsDiff += diff;
+        n++;
+      }
+    }
+    
+    const avgDiff = n > 0 ? sumAbsDiff / n : 0;
+    
+    console.log(`[SHADOW] Expiry=${expiryMs}:`);
+    console.log(`  Simple: theta=${simple.theta.toFixed(8)}`);
+    console.log(`  Robust: theta=${robust.theta.toFixed(8)}, rmse=${robust.rmse.toFixed(8)}`);
+    console.log(`  Diffs: avg=${avgDiff.toFixed(8)}, max=${maxDiff.toFixed(8)}`);
   }
 }
