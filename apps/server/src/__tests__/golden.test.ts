@@ -13,7 +13,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 // Import your backtest runner (adjust path)
-// import { runBacktest } from '../backtest';
+// import { runBacktest } from '../backtest/index.js';
 
 type BacktestResult = {
   finalPnL: number;
@@ -213,7 +213,7 @@ describe('Golden Backtest Tests', () => {
   describe('Factor Registry Validation', () => {
     it('should have consistent dimension', () => {
       // Import your registry
-      // import { d, FACTORS, FACTOR_LABELS } from '../risk/factors';
+      // import { d, FACTORS, FACTOR_LABELS } from '../risk/factors/index.js';
       
       const d = 6; // Placeholder
       const FACTOR_LABELS = ['F', 'Gamma', 'VegaATM', 'Skew', 'Wing', 'Term'];

@@ -1,8 +1,8 @@
 // src/calibration/deltaShellSmile.ts
 import { SVI, type SVIParams, type TraderMetrics } from '../volModels/dualSurfaceModel';
 import { timeToExpiryYears } from '../utils/time';
-import { black76Greeks } from '../risk';
-import { getMarketSpec } from '../markets';
+import { black76Greeks } from '../risk/index.js';
+import { getMarketSpec } from '../markets/index';
 
 export interface QuotePoint {
   strike: number;

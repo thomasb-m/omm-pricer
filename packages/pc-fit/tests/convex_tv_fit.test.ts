@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { fitConvexTV } from '../src/convex_tv_fit';
-import type { FitInput } from '../src/types';
+import { fitConvexTV } from '../src/convex_tv_fit.js';
+import type { FitInput } from '../src/types.js';
 
 describe('fitConvexTV', () => {
   const options = {

@@ -1,5 +1,5 @@
 // apps/server/src/test-factors.ts
-import { FACTORS, d, FACTOR_LABELS } from './risk/factors';
+import { FACTORS, d, FACTOR_LABELS } from './risk/factors/index.js';
 import { factorGreeksFor, MarketContext } from './risk/factorGreeksLoader';
 import { Theta } from './risk/FactorSpace';
 

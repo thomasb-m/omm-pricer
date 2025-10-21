@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { projectThetaByCallConvexity } from '../src/guards';
+import { projectThetaByCallConvexity } from '../src/guards.js';
 
 describe('projectThetaByCallConvexity units', () => {
   it('uses normalized intrinsic + TV', () => {

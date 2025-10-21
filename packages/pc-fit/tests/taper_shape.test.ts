@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { taperAbsK } from '../src/interp';
+import { taperAbsK } from '../src/interp.js';
 
 describe('taperAbsK', () => {
   it('is 1 at ATM and decreases toward wings', () => {

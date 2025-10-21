@@ -1,14 +1,14 @@
 import type { SVIParams } from "@core-types";
-import { black76Call } from "./black76";
-import { sviIV, sviTotalVariance } from "./smile";
-import { kRel, asKRel } from "./conventions";
+import { black76Call } from "./black76.js";
+import { sviIV, sviTotalVariance } from "./smile.js";
+import { kRel, asKRel } from "./conventions.js";
 import {
   CONVEXITY_TOL,
   BUTTERFLY_TOL,
   CAL_W_REL_BPS,
   EPS_W_ABS,
   MAX_WING_SLOPE,
-} from "./constants";
+} from "./constants.js";
 
 // Variance convexity on uniform k-grid
 export function checkVarianceConvexityGrid(

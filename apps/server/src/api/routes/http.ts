@@ -16,9 +16,9 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { Server } from 'http';
 
 // Import your services (adjust paths as needed)
-import { SigmaService } from '../risk/SigmaService';
-import { FactorRisk } from '../risk/FactorRisk';
-import { FACTORS, FACTOR_LABELS, d } from '../risk/factors';
+import { SigmaService } from '../risk/SigmaService.js';
+import { FactorRisk } from '../risk/FactorRisk.js';
+import { FACTORS, FACTOR_LABELS, d } from '../risk/factors.js';
 
 // Placeholder types - replace with your actual types
 type QuoteState = {

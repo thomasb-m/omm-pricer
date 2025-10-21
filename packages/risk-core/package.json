@@ -9,5 +9,11 @@
     "clean": "rimraf dist || rm -rf dist",
     "test": "vitest run"
   },
-  "private": true
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  }
 }

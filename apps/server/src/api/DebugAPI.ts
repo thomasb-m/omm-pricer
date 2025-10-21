@@ -15,7 +15,7 @@ import { SigmaService } from '../risk/SigmaService';
 import { FactorRisk } from '../risk/FactorRisk';
 import { QuoteExplanation } from '../engine/QuoteExplainer';
 import { FeatureConfig } from '../config/featureFlags';
-import { FACTOR_LABELS } from '../risk/factors';
+import { FACTOR_LABELS } from '../risk/factors/index.js';
 import { ABTestResult } from '../testing/ABTestRunner';
 
 export type TradeRecord = {

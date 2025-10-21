@@ -8,7 +8,7 @@
  * 3. Quote generation
  */
 
-import { d, FactorVector } from '../risk/factors';
+import { d, FactorVector } from '../risk/factors/index.js';
 import { FactorRisk, QuoteParams } from '../risk/FactorRisk';
 import { SigmaService } from '../risk/SigmaService';
 import { factorGreeksFor, Instrument, MarketContext } from '../risk/factorGreeksLoader';

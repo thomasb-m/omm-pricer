@@ -11,7 +11,7 @@ import {
 import { ModelConfig, getDefaultConfig } from './config/modelConfig';
 import { SmileInventoryController } from './smileInventoryController';
 import { DeltaConventions } from './pricing/blackScholes';
-import { black76Greeks } from "../risk";
+import { black76Greeks } from '../risk/index';
 import { overnightMasses } from "../pricing/seasonality";
 import { eventMasses } from "../pricing/eventTable";
 import { timeToExpiryYears } from "../utils/time";

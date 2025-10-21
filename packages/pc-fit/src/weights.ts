@@ -1,4 +1,4 @@
-import { Leg, FitOptions } from './types';
+import { Leg, FitOptions } from './types.js';
 
 export function baseWeights(
   legs: Leg[],

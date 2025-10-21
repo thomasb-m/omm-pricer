@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { trimByTVBps } from '../src/weights';
+import { trimByTVBps } from '../src/weights.js';
 
 describe('trimByTVBps', () => {
   it('trims by bps of market TV', () => {

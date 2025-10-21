@@ -14,7 +14,7 @@ import { SigmaService } from '../risk/SigmaService';
 import { FactorRisk } from '../risk/FactorRisk';
 import { SimAdapter } from '../exchange/SimAdapter';
 import { FeatureConfig } from '../config/featureFlags';
-import { d } from '../risk/factors';
+import { d } from '../risk/factors/index.js';
 import { Instrument, MarketContext, factorGreeksFor } from '../risk/factorGreeksLoader';
 import { PriceFn, Theta } from '../risk/FactorSpace';
 

@@ -1,18 +1,28 @@
 {
   "compilerOptions": {
-    "target": "ES2020",                    // Change from ES5 to ES2020
-    "module": "commonjs",
-    "moduleResolution": "node",  
-    "esModuleInterop": true,               // Add this
-    "downlevelIteration": true,            // Add this
-    "allowSyntheticDefaultImports": true,  // Add this (usually comes with esModuleInterop)
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "esModuleInterop": true,
+    "downlevelIteration": true,
+    "allowSyntheticDefaultImports": true,
     "strict": true,
-    "skipLibCheck": true,                  // Add this to skip checking node_modules
+    "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "outDir": "./dist",
     "rootDir": "./src",
-    "resolveJsonModule": true
+    "resolveJsonModule": true,
+    "types": [
+      "node",
+      "vitest",
+      "undici-types"
+    ]
   },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist"]
+  "include": [
+    "src*"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist"
+  ]
 }

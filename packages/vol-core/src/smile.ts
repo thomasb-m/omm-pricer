@@ -1,6 +1,6 @@
 import { SVIParams } from "@core-types";
-import { EPS_TV, EPS_T, EPS_CONVEXITY, MAX_WING_SLOPE } from "./constants";
-import type { KRel } from "./conventions";
+import { EPS_TV, EPS_T, EPS_CONVEXITY, MAX_WING_SLOPE } from "./constants.js";
+import type { KRel } from "./conventions.js";
 
 export interface SVIValidation {
   valid: boolean;

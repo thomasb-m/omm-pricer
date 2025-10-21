@@ -14,7 +14,7 @@ import { PriceFn, Theta } from './risk/FactorSpace';
 import { DebugAPI } from './api/DebugAPI';
 import { SigmaService } from './risk/SigmaService';
 import { FactorRisk } from './risk/FactorRisk';
-import { d } from './risk/factors';
+import { d } from './risk/factors/index.js';
 
 // ============================================================================
 // Define EXTREME Configurations

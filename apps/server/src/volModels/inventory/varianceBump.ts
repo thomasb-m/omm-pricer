@@ -13,7 +13,7 @@
  * - Microstructure bands vs CC mid
  */
 
-import { black76Greeks } from "../../risk";
+import { black76Greeks } from "../../risk/index.js";
 
 // Helper for Black-76 vega using existing black76Greeks
 function black76Vega(params: {

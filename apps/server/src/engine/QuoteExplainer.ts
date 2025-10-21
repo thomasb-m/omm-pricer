@@ -9,7 +9,7 @@
  */
 
 import { QuoteParams } from '../risk/FactorRisk';
-import { FACTOR_LABELS } from '../risk/factors';
+import { FACTOR_LABELS } from '../risk/factors/index.js';
 
 export type QuoteDecision = 'quoted' | 'passed';
 

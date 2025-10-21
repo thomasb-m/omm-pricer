@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { dot } from "../src/index";
+import { dot } from "../src/index.js";
 
 describe("@risk-core smoke", () => {
   it("dot product works", () => {

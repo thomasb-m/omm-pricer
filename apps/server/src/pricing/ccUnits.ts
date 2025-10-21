@@ -1,5 +1,5 @@
 // apps/server/src/pricing/ccUnits.ts
-import { black76Greeks } from "../risk";
+import { black76Greeks } from "../risk/index";
 
 /**
  * Return option price in BTC numeraire (Deribit-style), using Black-76.

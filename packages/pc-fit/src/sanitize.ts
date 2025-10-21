@@ -1,4 +1,4 @@
-import { Leg } from './types';
+import { Leg } from './types.js';
 
 export interface SanitizedLegs {
   legs: Leg[];

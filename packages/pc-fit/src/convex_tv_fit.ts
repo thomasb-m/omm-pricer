@@ -1,9 +1,9 @@
-import { FitInput, FitResult, FitOptions } from './types';
-import { sanitizeLegs } from './sanitize';
-import { taperAbsK } from './interp';
-import { baseWeights, trimByTVBps, applyTrimBps } from './weights';
-import { huberWeights, tukeyWeights } from './robust';
-import { convexRepair, projectThetaByCallConvexity } from './guards';
+import { FitInput, FitResult, FitOptions } from './types.js';
+import { sanitizeLegs } from './sanitize.js';
+import { taperAbsK } from './interp.js';
+import { baseWeights, trimByTVBps, applyTrimBps } from './weights.js';
+import { huberWeights, tukeyWeights } from './robust.js';
+import { convexRepair, projectThetaByCallConvexity } from './guards.js';
 
 export function fitConvexTV(input: FitInput): FitResult {
   const { legs, forward, ccTV, phi, options } = input;

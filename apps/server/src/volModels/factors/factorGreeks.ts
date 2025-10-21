@@ -5,7 +5,7 @@
  */
 import { FactorVec } from "./FactorSpace";
 import { SVI, SVIParams, TraderMetrics } from "../dualSurfaceModel";
-import { black76Greeks } from "../../risk";
+import { black76Greeks } from "../../risk/index.js";
 
 const tiny = 1e-12;
 

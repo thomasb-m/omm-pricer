@@ -3,7 +3,7 @@ import cors from "@fastify/cors";
 import "dotenv/config";
 import { PrismaClient } from "@prisma/client";
 import { startIngest } from "./ingest";
-import { computePortfolioRisk, computeRealizedPnL } from "./risk";
+import { computePortfolioRisk, computeRealizedPnL } from "./risk/index.js";
 import { quoteEngine, initializeWithMarketData } from "./quoteEngine";
 import { MarketRecorder } from "./replay/marketRecorder";
 import { Backtester, PassiveMMStrategy, InventoryAwareStrategy } from "./replay/backtester";

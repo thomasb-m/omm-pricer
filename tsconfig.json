@@ -1,8 +1,8 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "ES2022",
-    "moduleResolution": "nodenext",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
@@ -15,23 +15,18 @@
       "@vol-core/*": [
         "packages/vol-core/src/*"
       ],
-      "@vol-validation/*": [
-        "packages/vol-validation/src/*"
-      ],
-      "@pc-fit/*": [
-        "packages/pc-fit/src/*"
-      ],
-      "@svi-core/*": [
-        "packages/svi-core/src/*"
-      ],
-      "@risk-core/*": [
+      "risk-core/*": [
         "packages/risk-core/src/*"
+      ],
+      "pc-fit/*": [
+        "packages/pc-fit/src/*"
       ]
     },
     "types": [
       "node",
       "vitest/globals",
-      "node"
+      "undici-types",
+      "vitest"
     ]
   },
   "include": [
@@ -60,19 +55,20 @@
   "files": [],
   "references": [
     {
-      "path": "apps/server"
-    },
-    {
       "path": "packages/core-types"
     },
     {
-      "path": "packages/pc-fit"
+      "path": "packages/vol-core"
     },
     {
       "path": "packages/risk-core"
     },
     {
-      "path": "packages/vol-core"
+      "path": "packages/pc-fit"
+    },
+    {
+      "path": "apps/server"
     }
-  ]
+  ],
+  "extends": "./tsconfig.base.json"
 }
