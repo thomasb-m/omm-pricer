@@ -3,7 +3,7 @@ import cors from "@fastify/cors";
 import "dotenv/config";
 import { PrismaClient } from "@prisma/client";
 import { startIngest } from "./ingest";
-import { computePortfolioRisk, computeRealizedPnL } from "./risk";
+import { computePortfolioRisk, computeRealizedPnL } from "./risk/index.js";
 import { quoteEngine, initializeWithMarketData } from "./quoteEngine";
 import { MarketRecorder } from "./replay/marketRecorder";
 import { Backtester, PassiveMMStrategy, InventoryAwareStrategy } from "./replay/backtester";
@@ -14,25 +14,45 @@ const ensureMs = (expiryOrYears?: number) =>
     ? Math.floor(expiryOrYears)
     : Math.floor(Date.now() + (expiryOrYears ?? 0.08) * YEAR_MS);
 
-async function main() {
-  console.log(`[server] PORT=${process.env.PORT} NETWORK=${process.env.DERIBIT_NETWORK} MOCK=${process.env.MOCK_MODE}`);
-
-  if (!process.env.MOCK_MODE) {
-    process.env.MOCK_MODE = "1";
-    console.log("[server] Enabling MOCK_MODE for testing");
-  }
-
-  const app = Fastify({ logger: true });
-  await app.register(cors, { origin: true });
-
-  const prisma = new PrismaClient();
-
-  console.log("[server] Starting ingest process...");
-  startIngest(prisma).catch(err => console.error("INGEST ERROR:", err));
-
-  const recorder = new MarketRecorder(prisma);
-  await initializeWithMarketData(prisma);
-  recorder.startRecording("BTC", 60000);
+    export async function startServer() {
+      console.log(`[server] PORT=${process.env.PORT} NETWORK=${process.env.DERIBIT_NETWORK} MOCK=${process.env.MOCK_MODE}`);
+    
+      if (!process.env.MOCK_MODE) {
+        process.env.MOCK_MODE = "1";
+        console.log("[server] Enabling MOCK_MODE for testing");
+      }
+    
+      const app = Fastify({ logger: false }); // Less noise
+      await app.register(cors, { origin: true });
+    
+      const prisma = new PrismaClient();
+    
+      // Connect to database first
+      try {
+        await prisma.$connect();
+        console.log("[server] ✅ Database connected");
+      } catch (err) {
+        console.error("[server] ❌ Database connection failed:", err);
+        process.exit(1);
+      }
+    
+      console.log("[server] Starting ingest process...");
+      startIngest(prisma).catch(err => console.error("INGEST ERROR:", err));
+    
+      console.log("[server] Initializing quote engine...");
+      try {
+        await initializeWithMarketData(prisma);
+        console.log("[server] ✅ Quote engine initialized");
+      } catch (err) {
+        console.error("FATAL: Quote engine init failed:", err);
+        if (process.env.MOCK_MODE !== "1") {
+          process.exit(1);
+        }
+        console.log("[server] ⚠️  Continuing in MOCK mode");
+      }
+    
+      const recorder = new MarketRecorder(prisma);
+      recorder.startRecording("BTC", 60000);
 
   // ------------------------
   // Health
@@ -53,6 +73,26 @@ async function main() {
       total: realized + port.totals.unrealized,
       totals: port.totals,
       legs: port.legs
+    };
+  });
+
+  app.get("/pnl/summary", async () => {
+    const file = "data/trades.jsonl";
+    if (!require("fs").existsSync(file)) {
+      return { count: 0, totalEdge: 0, avgEdge: 0 };
+    }
+    const lines = require("fs").readFileSync(file, "utf8").trim().split("\n");
+    let totalEdge = 0;
+    for (const ln of lines) {
+      try {
+        const r = JSON.parse(ln);
+        totalEdge += r.pnl_est ?? 0;
+      } catch {}
+    }
+    return {
+      count: lines.length,
+      totalEdge: parseFloat(totalEdge.toFixed(2)),
+      avgEdge: lines.length ? parseFloat((totalEdge / lines.length).toFixed(4)) : 0
     };
   });
 
@@ -281,7 +321,9 @@ async function main() {
   console.log(`server up http://localhost:${port}`);
 }
 
-main().catch((err) => {
-  console.error("FATAL:", err);
-  process.exit(1);
-});
+if (typeof require !== "undefined" && require.main === module) {
+  startServer().catch((err) => {
+    console.error("FATAL:", err);
+    process.exit(1);
+  });
+}

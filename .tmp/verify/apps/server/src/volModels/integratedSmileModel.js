@@ -1,0 +1,240 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.IntegratedSmileModel = void 0;
+/**
+ * Integrated Dual Surface Model with Market Calibration
+ * Convention: TradeExecution.size is **DEALER-signed**
+ *   - Customer BUY  => dealer SELL  => size = -|q|
+ *   - Customer SELL => dealer BUY   => size = +|q|
+ */
+const dualSurfaceModel_1 = require("./dualSurfaceModel");
+const modelConfig_1 = require("./config/modelConfig");
+const smileInventoryController_1 = require("./smileInventoryController");
+const blackScholes_1 = require("./pricing/blackScholes");
+const risk_1 = require("../risk");
+const time_1 = require("../utils/time");
+const tiny = 1e-12;
+const safe = (x, fallback = 0) => (Number.isFinite(x) ? x : fallback);
+class IntegratedSmileModel {
+    surfaces = new Map();
+    inventoryController;
+    riskScorer;
+    config;
+    sviConfig;
+    version = 0;
+    marketIVs = new Map();
+    constructor(product = 'BTC') {
+        this.config = (0, modelConfig_1.getDefaultConfig)(product);
+        this.sviConfig = this.convertToSVIConfig(this.config);
+        this.inventoryController = new smileInventoryController_1.SmileInventoryController(this.config);
+        this.riskScorer = new dualSurfaceModel_1.RiskScorer();
+    }
+    deriveMetricsFromMarketIV(atmIV, expiryYears) {
+        const L0 = atmIV * atmIV * expiryYears;
+        // Scale wing slopes with L0 to maintain consistency
+        const scale = Math.sqrt(Math.max(L0, 0.001) / 0.04); // Normalize to typical L0~0.04
+        return {
+            L0,
+            S0: -0.02 * scale,
+            C0: 0.5,
+            S_neg: -0.8 * scale,
+            S_pos: 0.9 * scale
+        };
+    }
+    convertToSVIConfig(mc) {
+        const edgeParams = new Map();
+        mc.buckets.forEach(b => edgeParams.set(b.name, b.edgeParams));
+        return {
+            bMin: mc.svi.bMin, sigmaMin: mc.svi.sigmaMin, rhoMax: mc.svi.rhoMax,
+            sMax: mc.svi.slopeMax, c0Min: mc.svi.c0Min,
+            buckets: mc.buckets.map(b => ({ name: b.name, minDelta: b.minDelta, maxDelta: b.maxDelta })),
+            edgeParams, rbfWidth: mc.rbf.width, ridgeLambda: mc.rbf.ridgeLambda,
+            maxL0Move: mc.riskLimits.maxL0Move, maxS0Move: mc.riskLimits.maxS0Move, maxC0Move: mc.riskLimits.maxC0Move
+        };
+    }
+    updateCC(expiry, metrics) {
+        const newCC = dualSurfaceModel_1.SVI.fromMetrics(metrics, this.sviConfig);
+        if (!dualSurfaceModel_1.SVI.validate(newCC, this.sviConfig))
+            throw new Error('Invalid SVI parameters');
+        let s = this.surfaces.get(expiry);
+        if (!s) {
+            s = { expiry, cc: newCC, pc: newCC, nodes: new Map() };
+            this.surfaces.set(expiry, s);
+        }
+        else {
+            s.cc = newCC;
+            this.updatePC(s);
+        }
+        this.version++;
+    }
+    updatePC(surface) {
+        surface.pc = this.inventoryController.adjustSVIForInventory(surface.cc);
+    }
+    onTrade(trade) {
+        const s = this.surfaces.get(trade.expiryMs);
+        if (!s) {
+            console.warn(`No surface for expiryMs=${trade.expiryMs}`);
+            return;
+        }
+        const T = (0, time_1.timeToExpiryYears)(trade.expiryMs, trade.time ?? Date.now());
+        if (T <= 0) {
+            console.warn('Expired trade ignored (T<=0):', trade);
+            return;
+        }
+        // Keep node state fresh
+        this.updateNodeState(s, {
+            strike: trade.strike, price: trade.price, size: trade.size,
+            expiryMs: trade.expiryMs, forward: trade.forward, optionType: trade.optionType, time: trade.time ?? Date.now()
+        });
+        // Robust vega for inventory update (with IV floor)
+        const F = trade.forward, K = trade.strike, isCall = trade.optionType === 'C';
+        const ivFallback = this.marketIVs.get(trade.expiryMs) ?? 0.35;
+        const k = Math.log(K / Math.max(F, tiny));
+        let ccVar = dualSurfaceModel_1.SVI.w(s.cc, k);
+        if (!Number.isFinite(ccVar) || ccVar <= 0) {
+            const fallbackVar = ivFallback * ivFallback * Math.max(T, 1e-8);
+            console.log(`[onTrade] Using fallback variance: ${fallbackVar}`);
+            ccVar = Math.max(fallbackVar, 1e-12);
+        }
+        let ccIV = Math.sqrt(ccVar / Math.max(T, 1e-12));
+        console.log(`[onTrade] After fallback: ccVar=${ccVar}, ccIV=${ccIV}`);
+        // ⬇️ Floor the IV used for VEGA calc to avoid pdf(d1) → 0 on wings
+        const ivMin = Math.max(0.15, 0.5 * ivFallback); // 15% absolute or ½ ATM
+        const ivUsed = Math.max(ccIV, ivMin);
+        let g = (0, risk_1.black76Greeks)(F, K, Math.max(T, 1e-8), ivUsed, isCall, 1.0);
+        if (!Number.isFinite(g.vega)) {
+            g = (0, risk_1.black76Greeks)(F, K, Math.max(T, 1e-8), Math.max(ivFallback, ivMin), isCall, 1.0);
+        }
+        const vegaSafe = Number.isFinite(g.vega) ? g.vega : 0;
+        const bucket = blackScholes_1.DeltaConventions.strikeToBucket(K, F, ivUsed, Math.max(T, 1e-8));
+        // 🔎 Debug
+        console.log(`[ISM.onTrade] bucket=${bucket} K=${K} size(dealer)=${trade.size} ccIV=${ccIV} ivUsed=${ivUsed} vega=${vegaSafe} product=${trade.size * vegaSafe}`);
+        this.inventoryController.updateInventory(K, trade.size, vegaSafe, bucket);
+        this.updatePC(s);
+        this.version++;
+    }
+    updateNodeState(surface, trade) {
+        let node = surface.nodes.get(trade.strike);
+        const T = (0, time_1.timeToExpiryYears)(trade.expiryMs, trade.time);
+        const k = Math.log(trade.strike / Math.max(trade.forward, tiny));
+        const ccVar = dualSurfaceModel_1.SVI.w(surface.cc, k);
+        const ccIV = Math.sqrt(Math.max(ccVar, tiny) / Math.max(T, 1e-8));
+        const greeks = (0, risk_1.black76Greeks)(trade.forward, trade.strike, Math.max(T, 1e-8), ccIV, trade.optionType === 'C', 1.0);
+        const widthRef = this.riskScorer.computeWidth({ gamma: greeks.gamma });
+        const bucket = blackScholes_1.DeltaConventions.strikeToBucket(trade.strike, trade.forward, ccIV, Math.max(T, 1e-8));
+        if (!node) {
+            node = { strike: trade.strike, pcAnchor: trade.price, widthRef, position: trade.size, lastBucket: bucket, lastTradeTime: trade.time };
+            surface.nodes.set(trade.strike, node);
+        }
+        else {
+            node.pcAnchor = trade.price;
+            node.position += trade.size;
+            node.widthRef = widthRef;
+            node.lastBucket = bucket;
+            node.lastTradeTime = trade.time;
+        }
+    }
+    calibrateFromMarket(expiry, marketQuotes, spot) {
+        if (marketQuotes.length === 0) {
+            console.warn('No market quotes provided for calibration');
+            return;
+        }
+        const atm = marketQuotes.reduce((c, q) => Math.abs(q.strike - spot) < Math.abs(c.strike - spot) ? q : c);
+        this.marketIVs.set(expiry, atm.iv);
+        const m = this.deriveMetricsFromMarketIV(atm.iv, expiry);
+        this.updateCC(expiry, m);
+    }
+    getQuote(expiryMs, strike, forward, optionType, marketIV) {
+        const isCall = optionType === 'C';
+        const Traw = (0, time_1.timeToExpiryYears)(expiryMs);
+        const T = Math.max(safe(Traw, 0), 1e-8);
+        let s = this.surfaces.get(expiryMs);
+        let atmIV;
+        let recal = false;
+        if (marketIV !== undefined) {
+            atmIV = marketIV;
+            const cached = this.marketIVs.get(expiryMs);
+            if (!cached || Math.abs(atmIV - cached) > 0.01) {
+                this.marketIVs.set(expiryMs, atmIV);
+                recal = true;
+            }
+        }
+        else
+            atmIV = this.marketIVs.get(expiryMs) ?? 0.35;
+        if (!s || recal) {
+            const m = this.deriveMetricsFromMarketIV(atmIV, T);
+            this.updateCC(expiryMs, m);
+            s = this.surfaces.get(expiryMs);
+            this.updatePC(s);
+        }
+        const k = safe(Math.log(strike / Math.max(forward, tiny)), 0);
+        // CC mid
+        let ccVar = Math.max(safe(dualSurfaceModel_1.SVI.w(s.cc, k), tiny), tiny);
+        let ccIV = Math.max(safe(Math.sqrt(ccVar / T), 1e-8), 1e-8);
+        let ccG = (0, risk_1.black76Greeks)(forward, strike, T, ccIV, isCall, 1.0);
+        let ccMid = safe(ccG.price, 0);
+        // PC mid
+        let pcVar = Math.max(safe(dualSurfaceModel_1.SVI.w(s.pc, k), tiny), tiny);
+        let pcIV = Math.max(safe(Math.sqrt(pcVar / T), 1e-8), 1e-8);
+        let pcG = (0, risk_1.black76Greeks)(forward, strike, T, pcIV, isCall, 1.0);
+        let pcMid = safe(pcG.price, 0);
+        // Fallback mids if collapsed
+        const ivFallback = Number.isFinite(marketIV) ? marketIV : 0.35;
+        if (ccMid <= 1e-12) {
+            ccG = (0, risk_1.black76Greeks)(forward, strike, T, ivFallback, isCall, 1.0);
+            ccMid = Math.max(0, ccG.price);
+            ccIV = ivFallback;
+        }
+        if (pcMid <= 1e-12) {
+            pcG = (0, risk_1.black76Greeks)(forward, strike, T, ivFallback, isCall, 1.0);
+            pcMid = Math.max(0, pcG.price);
+            pcIV = ivFallback;
+        }
+        const midIsSane = (p) => Number.isFinite(p) && p >= 0 && p <= Math.max(forward, strike) * 2;
+        if (!midIsSane(ccMid))
+            ccMid = Math.max(0, forward * ccIV * Math.sqrt(T) * 0.4);
+        if (!midIsSane(pcMid))
+            pcMid = Math.max(0, forward * pcIV * Math.sqrt(T) * 0.4);
+        const bucket = blackScholes_1.DeltaConventions.strikeToBucket(strike, forward, ccIV, T);
+        let node = s.nodes.get(strike);
+        if (!node) {
+            node = { strike, pcAnchor: pcMid, widthRef: this.riskScorer.computeWidth({ gamma: ccG.gamma }), position: 0, lastBucket: bucket, lastTradeTime: Date.now() };
+            s.nodes.set(strike, node);
+        }
+        const currentWidth = this.riskScorer.computeWidth({ gamma: pcG.gamma, J_L0: 1.0, J_S0: 0.5, J_C0: 0.3 });
+        const bid = Math.max(0, pcMid - currentWidth);
+        const ask = pcMid + currentWidth;
+        const edge = pcMid - ccMid;
+        // Inventory-aware sizes (simple)
+        const baseSize = this.config.quotes.sizeBlocks;
+        const invState = this.inventoryController.getInventoryState();
+        const bucketInv = invState.get(bucket);
+        let bidSize = baseSize, askSize = baseSize;
+        if (bucketInv && typeof bucketInv.vega === 'number') {
+            const vegaSigned = bucketInv.vega;
+            const vref = this.config.buckets.find((b) => b.name === bucket)?.edgeParams.Vref ?? 100;
+            const invRatio = Math.min(5, Math.abs(vegaSigned) / Math.max(vref, 1e-6));
+            if (vegaSigned < 0)
+                askSize = Math.max(10, Math.round(baseSize * Math.exp(-invRatio)));
+            else if (vegaSigned > 0)
+                bidSize = Math.max(10, Math.round(baseSize * Math.exp(-invRatio)));
+        }
+        return { bid, ask, bidSize, askSize, pcMid, ccMid, edge, bucket };
+    }
+    getInventorySummary() {
+        const invState = this.inventoryController.getInventoryState();
+        const adjustments = this.inventoryController.calculateSmileAdjustments();
+        const summary = { totalVega: 0, byBucket: {}, smileAdjustments: adjustments };
+        for (const [bucket, inv] of invState) {
+            const v = Number(inv.vega) || 0;
+            summary.totalVega += v;
+            summary.byBucket[bucket] = { vega: v, count: inv.count };
+        }
+        return summary;
+    }
+    getCCSVI(expiryMs) {
+        const s = this.surfaces.get(expiryMs);
+        return s ? s.cc : null;
+    }
+}
+exports.IntegratedSmileModel = IntegratedSmileModel;

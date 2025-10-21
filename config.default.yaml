@@ -1,0 +1,39 @@
+features:
+  usePythonGoldens: true
+  enablePricing: true
+  enableFitter: false
+  enableShadow: false
+
+primitives:
+  daycount: ACT_365
+  # secondsPerYear removed - derive from daycount
+  epsilonT: 1e-6
+
+guards:
+  enforceStaticNoArb: true
+  maxWingSlope: 2.0
+  minTotalVariance: 1.0e-6
+
+term:
+  method: monotone_convex_tv
+  shortDatedBlend:
+    enabled: true
+    T_blend: 0.0055
+
+risk:
+  covariance:
+    sources: [factor_returns, pnl_innovations]
+    alpha_structural: 0.01
+    alpha_pc: 0.10
+    shrinkage: ledoit_wolf
+    robust:
+      huberDeltaBps: 10
+      hampel: { k: 3, t0: 3, t1: 8 }
+    regime:
+      decayOnShock: true
+      maxEigenRatio: 25
+  lambda:
+    learningRate: 0.05
+    capAbs: 3.0
+    targetVolBps: 5
+    floorBps: 1

@@ -1,0 +1,136 @@
+diff --git a/apps/server/jest.config.cjs b/apps/server/jest.config.cjs
+new file mode 100644
+index 0000000..8b56d5b
+--- /dev/null
++++ b/apps/server/jest.config.cjs
+@@ -0,0 +1,13 @@
++module.exports = {
++  preset: 'ts-jest',
++  testEnvironment: 'node',
++  transform: {
++    '^.+\\.tsx?$': 'ts-jest',
++  },
++  moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json', 'node'],
++  testMatch: [
++    '<rootDir>/src/**/*.test.ts',
++    '<rootDir>/src/**/*.test.tsx',
++  ],
++  verbose: true,
++};
+diff --git a/apps/server/src/quoteEngine.ts b/apps/server/src/quoteEngine.ts
+index b72c9d0..ea35f82 100644
+--- a/apps/server/src/quoteEngine.ts
++++ b/apps/server/src/quoteEngine.ts
+@@ -86,10 +86,13 @@ export class QuoteEngine {
+   getQuote(req: QuoteRequest): Quote {
+     const forward = this.getForward(req.symbol);
+
+-    // NEW: drive the IntegratedSmileModel via volService
+-    const q = volService.getQuoteWithIV(
+-      req.symbol,
+-      req.expiryMs,
+-      req.strike,
+-      req.optionType,
+-      req.marketIV
+-    );
++    // ✅ Correct call order (expiryMs, strike, forward/IV)
++    const q = volService.getQuoteWithIV(
++      req.symbol,
++      req.strike,
++      req.expiryMs,
++      req.marketIV,
++      req.optionType
++    );
+ 
+     // size clamp (optional)
+     let bidSize = q.bidSize;
+diff --git a/apps/server/src/volModels/factors/FactorSpace.ts b/apps/server/src/volModels/factors/FactorSpace.ts
+new file mode 100644
+index 0000000..0c5f17d
+--- /dev/null
++++ b/apps/server/src/volModels/factors/FactorSpace.ts
+@@ -0,0 +1,29 @@
++/**
++ * FactorSpace — types + helpers for factor calculus
++ * Factors: [L0, S0, C0, S_neg, S_pos, F]
++ */
++export type FactorVec = [number, number, number, number, number, number];
++export const ZeroFactors: FactorVec = [0,0,0,0,0,0];
++
++export function dot(a: FactorVec, b: FactorVec): number {
++  let s = 0;
++  for (let i=0;i<6;i++) s += a[i]*b[i];
++  return s;
++}
++
++export function axpy(y: FactorVec, a: number, x: FactorVec): FactorVec {
++  return [
++    y[0] + a*x[0],
++    y[1] + a*x[1],
++    y[2] + a*x[2],
++    y[3] + a*x[3],
++    y[4] + a*x[4],
++    y[5] + a*x[5],
++  ];
++}
++
++export function norm1(a: FactorVec): number {
++  return Math.abs(a[0])+Math.abs(a[1])+Math.abs(a[2])+Math.abs(a[3])+Math.abs(a[4])+Math.abs(a[5]);
++}
+diff --git a/apps/server/src/volModels/factors/factorGreeks.ts b/apps/server/src/volModels/factors/factorGreeks.ts
+new file mode 100644
+index 0000000..61f9ad0
+--- /dev/null
++++ b/apps/server/src/volModels/factors/factorGreeks.ts
+@@ -0,0 +1,61 @@
++/**
++ * Finite-difference factor greeks g_i = ∂P/∂θ_i
++ * Safe, slow prototype; replace with closed-form SVI partials later.
++ */
++import { FactorVec } from "./FactorSpace";
++import { SVI, SVIParams } from "../dualSurfaceModel";
++import { black76Greeks } from "../../risk";
++
++type PriceFn = (params: {cc: SVIParams; strike:number; T:number; F:number; isCall:boolean}) => number;
++
++const EPS: FactorVec = [1e-4, 1e-4, 1e-3, 1e-4, 1e-4, 1e-6];
++
++export function factorGreeksFiniteDiff(
++  cc: SVIParams,
++  strike: number,
++  T: number,
++  F: number,
++  isCall: boolean
++): FactorVec {
++  // Base price from CC
++  const base = black76Greeks(F, strike, T, Math.sqrt(SVI.w(cc, Math.log(strike/F))/T), isCall).price;
++
++  // Map factor → small transform in metric space
++  const m0 = SVI.toMetrics(cc);
++
++  function bump(i: number): number {
++    const m = { ...m0 };
++    switch (i) {
++      case 0: m.L0   += EPS[0]; break;
++      case 1: m.S0   += EPS[1]; break;
++      case 2: m.C0   += EPS[2]; break;
++      case 3: m.S_neg+= EPS[3]; break;
++      case 4: m.S_pos+= EPS[4]; break;
++      case 5: /*F*/   return black76Greeks(F+EPS[5], strike, T, Math.sqrt(SVI.w(cc, Math.log(strike/(F+EPS[5])))/T), isCall).price - base;
++    }
++    const bumped = SVI.fromMetrics(m, {
++      bMin: 0, sigmaMin: 1e-6, rhoMax: 0.999, sMax: 5, c0Min: 0.01,
++      buckets: [], edgeParams: new Map(), rbfWidth: 0, ridgeLambda: 0, maxL0Move: 0, maxS0Move: 0, maxC0Move: 0
++    });
++    return black76Greeks(F, strike, T, Math.sqrt(SVI.w(bumped, Math.log(strike/F))/T), isCall).price - base;
++  }
++
++  const g0 = bump(0)/EPS[0];
++  const g1 = bump(1)/EPS[1];
++  const g2 = bump(2)/EPS[2];
++  const g3 = bump(3)/EPS[3];
++  const g4 = bump(4)/EPS[4];
++  const g5 = bump(5)/EPS[5];
++
++  return [g0,g1,g2,g3,g4,g5];
++}

@@ -1,5 +1,8 @@
 import { PrismaClient } from "@prisma/client";
 import { quoteEngine } from "../quoteEngine";
+import { volService } from "../volModels/integration/volModelService";
+import { TradeLog } from "../logging/tradeLog";
+
 
 export type Side = "BUY" | "SELL";
 export type OptionType = "C" | "P";
@@ -52,12 +55,13 @@ type TickContext = {
 };
 
 function strikeGrid(F: number): number[] {
-  const low = Math.floor(F * 0.9 / 100) * 100;
-  const high = Math.ceil(F * 1.1 / 100) * 100;
+  const low = Math.floor(F * 0.97 / 1000) * 1000;
+  const high = Math.ceil(F * 1.03 / 1000) * 1000;
   const strikes: number[] = [];
-  for (let k = low; k <= high; k += 100) strikes.push(k);
+  for (let k = low; k <= high; k += 1000) strikes.push(k);
   return strikes;
 }
+
 
 function tradeEdgeUSD(side: Side, ccMid: number, bid: number, ask: number): number {
   return side === "SELL" ? ask - ccMid : ccMid - bid;
@@ -103,6 +107,12 @@ export class Backtester {
     endTime: number,
     optionType: OptionType = "P"
   ): Promise<{ strategy: string; summary: BacktestResult }> {
+    // Seed deterministic test data
+    const { seedTestData } = await import("./testDataSeed");
+    await seedTestData(this.prisma);
+    // Clear vol service state for determinism
+    const { quoteEngine } = await import("../quoteEngine");
+    quoteEngine.resetAllState();
     const beats = await this.prisma.ticker.findMany({
       where: { instrument: "BTC-PERPETUAL", tsMs: { gte: BigInt(startTime), lte: BigInt(endTime) } },
       orderBy: { tsMs: "asc" },
@@ -121,30 +131,75 @@ export class Backtester {
       const F = Number(b.markPrice ?? b.underlying ?? 0);
       if (!Number.isFinite(F) || F <= 0) continue;
       const expiryMs = ts + Math.round(14 * 24 * 3600 * 1000);
-
+    
+      // Estimate ATM IV from recent market (simple heuristic: 30-80 vol in BTC terms)
+      const atmIV = 0.35; // Placeholder - should come from market data
+    
       for (const strike of strikeGrid(F)) {
-        const q = quoteEngine.getQuote({ symbol, strike, expiryMs, optionType, marketIV: 0.31 });
+        const q = quoteEngine.getQuote({ 
+          symbol, strike, expiryMs, optionType, 
+          marketIV: atmIV  // Use dynamic IV here
+        });
+        
         const side = strat.decide(q, { ts, symbol, strike, expiryMs, optionType });
         if (!side) continue;
         const size = strat.size(q, { ts, symbol, strike, expiryMs, optionType });
         if (size <= 0) continue;
-
+    
         const ccMid = q.ccMid ?? q.mid;
         const edge = tradeEdgeUSD(side, ccMid, q.bid, q.ask);
-
+    
         trades += size;
         totalEdgeUSD += edge * size;
         if (edge > 0) wins += size;
-
+    
         // update inventory
         const inv = inventory[strike] || { qty: 0, avgPrice: 0, totalEdge: 0 };
         if (side === "SELL") inv.qty -= size; else inv.qty += size;
         inv.totalEdge += edge * size;
         inv.avgPrice = (inv.avgPrice * Math.abs(inv.qty) + (side === "SELL" ? q.ask : q.bid) * size) / (Math.abs(inv.qty) + size);
         inventory[strike] = inv;
-
-        byTrade.push({ ts, strike, expiryMs, side, optionType, price: side === "SELL" ? q.ask : q.bid, ccMid, edgeUSD: edge, bucket: q.bucket });
-        quoteEngine.executeTrade({ symbol, strike, expiryMs, optionType, side, size, price: side === "SELL" ? q.ask : q.bid, timestamp: ts } as any);
+    
+        const tradePx = side === "SELL" ? q.ask : q.bid;
+        
+        // Get factor inventory before trade
+        const factorsBefore = quoteEngine.getFactorInventory(symbol);
+        
+        byTrade.push({ 
+          ts, strike, expiryMs, side, optionType, 
+          price: tradePx, 
+          ccMid, edgeUSD: edge, bucket: q.bucket 
+        });
+        
+        // Execute trade
+        quoteEngine.executeTrade({ 
+          symbol, strike, expiryMs, optionType, side, size, 
+          price: tradePx, 
+          timestamp: ts,
+          marketIV: atmIV
+        });
+        
+        /// Get factor inventory after trade
+        const factorsAfter = quoteEngine.getFactorInventory(symbol);
+        
+        // Log trade with factor attribution
+        TradeLog.write({
+          ts,
+          symbol,
+          F,
+          K: strike,
+          expiryMs,
+          side,
+          qty: size,
+          ccMid,
+          pcMid: q.pcMid ?? q.mid,
+          tradePx,
+          dotLamG: factorsAfter.lambdaDotInventory,
+          I_before: factorsBefore.inventory,
+          I_after: factorsAfter.inventory,
+          lambda: factorsAfter.lambda,
+          pnl_est: edge * size
+        });
       }
     }
 

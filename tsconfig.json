@@ -1,0 +1,21 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@core-types": ["packages/core-types/src/index"],
+      "@vol-core/*": ["packages/vol-core/src/*"],
+      "@vol-validation/*": ["packages/vol-core-validation/src/*"],
+      "risk-core/*": ["packages/risk-core/src/*"],
+      "pc-fit/*": ["packages/pc-fit/src/*"]
+    }
+  },
+  "files": [],
+  "references": [
+    { "path": "packages/core-types" },
+    { "path": "packages/vol-core" },
+    { "path": "packages/risk-core" },
+    { "path": "packages/pc-fit" },
+    { "path": "apps/server" }
+  ]
+}

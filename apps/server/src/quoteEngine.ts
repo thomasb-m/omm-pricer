@@ -40,6 +40,7 @@ export interface Trade {
   size: number;
   price: number;
   timestamp: number;
+  marketIV?: number; 
 }
 
 export class QuoteEngine {
@@ -47,7 +48,7 @@ export class QuoteEngine {
 
   constructor() {
     // sensible defaults; will be overwritten at init
-    this.forwards.set("BTC", 45000);
+    this.forwards.set("BTC", 100000);
     this.forwards.set("ETH", 3000);
   }
 
@@ -59,7 +60,19 @@ export class QuoteEngine {
   }
 
   getForward(symbol: string): number {
-    return this.forwards.get(symbol) ?? 45000;
+    return this.forwards.get(symbol) ?? 100000;
+  }
+
+  calibrateExpiry(
+    symbol: string,
+    expiryMs: number,
+    marketQuotes: Array<{ strike: number; iv: number; weight?: number }>,
+    forward: number
+  ): void {
+    // Delegate to volService
+    const volService = require('./volModels/integration/volModelService').volService;
+    volService.calibrateExpiry(symbol, expiryMs, marketQuotes, forward);
+    console.log(`[QuoteEngine] Calibrated ${symbol} expiry ${new Date(expiryMs).toISOString().split('T')[0]} with ${marketQuotes.length} market quotes`);
   }
 
   getQuote(req: QuoteRequest): Quote {
@@ -69,11 +82,11 @@ export class QuoteEngine {
     // Ensure volService.getQuoteWithIV applies computePcQuote internally
     // and returns pcMid/ccMid/bucket in addition to the usual fields.
     const q = volService.getQuoteWithIV(
-      req.symbol,
-      req.expiryMs,
-      req.strike,
-      req.optionType,
-      req.marketIV
+      req.symbol, 
+      req.strike, 
+      req.expiryMs, 
+      req.marketIV,     // ← 4th argument
+      req.optionType    // ← 5th argument
     );
 
     // Optional size clamp by requested side/size
@@ -101,7 +114,7 @@ export class QuoteEngine {
       askSize,
       mid: q.mid,
       spread: q.spread,
-      edge: q.edge,
+      edge: (q.pcMid ?? q.mid) - (q.ccMid ?? q.mid),
       forward,
       timestamp: Date.now(),
       pcMid: q.pcMid,   // passthrough from volService (pricing curve mid)
@@ -122,24 +135,28 @@ export class QuoteEngine {
   }
 
   executeTrade(trade: Trade): void {
+    // Extract marketIV from trade (it's optional)
+    const marketIV = trade.marketIV;  // ← Add this line
+    
     // Route trade into the model (customer side; service handles signs/inventory)
     volService.onCustomerTrade(
       trade.symbol,
       trade.strike,
-      trade.side,                // "BUY" | "SELL" (customer side)
+      trade.side,
       trade.size,
       trade.price,
       trade.expiryMs,
       trade.optionType,
-      trade.timestamp
+      trade.timestamp,
+      marketIV  // ← Now this variable exists
     );
-
+  
     console.log(
       `Trade executed: Customer ${trade.side} ${trade.size}x ${trade.symbol} ` +
-      `${trade.optionType} ${trade.strike} @ ${trade.price}`
+      `${trade.optionType} ${trade.strike} @ ${trade.price}` +
+      (marketIV ? ` (IV=${(marketIV*100).toFixed(1)}%)` : '')
     );
-
-    // Optional: quick inventory diagnostics
+  
     const inv = volService.getInventory(trade.symbol);
     if (inv && typeof inv.totalVega === "number") {
       console.log(`${trade.symbol} inventory: ${inv.totalVega.toFixed(1)} vega`);
@@ -148,6 +165,20 @@ export class QuoteEngine {
 
   getInventory(symbol: string) {
     return volService.getInventory(symbol);
+  }
+
+  getFactorInventory(symbol: string) {
+    return volService.getFactorInventory(symbol);
+  }
+
+  resetAllState(): void {
+    volService.clearInventory("BTC");
+    volService.clearInventory("ETH");
+    // Force the model to reset surfaces
+    const btcModel = (volService as any).symbols?.get?.("BTC")?.model;
+    const ethModel = (volService as any).symbols?.get?.("ETH")?.model;
+    if (btcModel?.resetAllState) btcModel.resetAllState();
+    if (ethModel?.resetAllState) ethModel.resetAllState();
   }
 }
 
@@ -160,7 +191,7 @@ export async function initializeWithMarketData(prisma: PrismaClient) {
   });
 
   const btcForward =
-    btcPerp?.markPrice ?? btcPerp?.lastPrice ?? 45000;
+    btcPerp?.markPrice ?? 100000;
 
   console.log(`Initializing BTC with forward: ${btcForward}`);
   quoteEngine.updateForward("BTC", btcForward);

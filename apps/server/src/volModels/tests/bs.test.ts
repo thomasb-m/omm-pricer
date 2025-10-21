@@ -1,4 +1,4 @@
-import { black76Greeks } from "../../risk";
+import { black76Greeks } from "../../risk/index";
 
 describe("black76Greeks", () => {
   const F = 100_000;

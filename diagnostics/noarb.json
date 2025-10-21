@@ -1,0 +1,112 @@
+{
+  "timestamp": "2025-10-21T15:21:57.346Z",
+  "conventions": {
+    "k": "ln(K/F)",
+    "family": "svi_raw",
+    "tolerances": {
+      "varConvexity": "3e-6",
+      "butterfly": "1e-8",
+      "calendar": "2.0 bp relative"
+    }
+  },
+  "static": {
+    "totalFixtures": 3,
+    "passed": 3,
+    "failed": 0,
+    "synthetic": 2,
+    "fixtures": [
+      {
+        "fixtureId": "btc_2025-01-03_7d_result",
+        "synthetic": false,
+        "tenorDays": null,
+        "passed": true,
+        "wingSlopes": {
+          "left": 0.056778908714860445,
+          "right": 0.022279781915397735,
+          "leftOK": true,
+          "rightOK": true
+        },
+        "violations": {
+          "varConvexity": 0,
+          "butterflies": 0,
+          "callConvexity": 0
+        },
+        "margins": {
+          "minVarConvexity": null,
+          "minCallConvexity": null,
+          "minButterfly": 0.000001122559387119193
+        }
+      },
+      {
+        "fixtureId": "btc_2025-01-03_7d_synthetic_14d",
+        "synthetic": true,
+        "tenorDays": 14,
+        "passed": true,
+        "wingSlopes": {
+          "left": 0.056778908714860445,
+          "right": 0.022279781915397735,
+          "leftOK": true,
+          "rightOK": true
+        },
+        "violations": {
+          "varConvexity": 0,
+          "butterflies": 0,
+          "callConvexity": 0
+        },
+        "margins": {
+          "minVarConvexity": null,
+          "minCallConvexity": null,
+          "minButterfly": 0.000001122559387119193
+        }
+      },
+      {
+        "fixtureId": "btc_2025-01-03_7d_synthetic_30d",
+        "synthetic": true,
+        "tenorDays": 30,
+        "passed": true,
+        "wingSlopes": {
+          "left": 0.056778908714860445,
+          "right": 0.022279781915397735,
+          "leftOK": true,
+          "rightOK": true
+        },
+        "violations": {
+          "varConvexity": 0,
+          "butterflies": 0,
+          "callConvexity": 0
+        },
+        "margins": {
+          "minVarConvexity": null,
+          "minCallConvexity": null,
+          "minButterfly": 0.000001122559387119193
+        }
+      }
+    ]
+  },
+  "calendar": {
+    "totalPairs": 2,
+    "violations": 0,
+    "pairs": [
+      {
+        "from": "btc_2025-01-03_7d_result",
+        "to": "btc_2025-01-03_7d_synthetic_14d",
+        "T1": 0.0191780822,
+        "T2": 0.038356164383561646,
+        "violations": 0,
+        "minMargin": 0,
+        "minMarginK": -2.4,
+        "minMarginBps": 0
+      },
+      {
+        "from": "btc_2025-01-03_7d_synthetic_14d",
+        "to": "btc_2025-01-03_7d_synthetic_30d",
+        "T1": 0.038356164383561646,
+        "T2": 0.0821917808219178,
+        "violations": 0,
+        "minMargin": 0,
+        "minMarginK": -2.4,
+        "minMarginBps": 0
+      }
+    ]
+  }
+}

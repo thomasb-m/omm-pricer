@@ -1,0 +1,4 @@
+📁 Repo root: /Users/bryonybamford/Projects/Tom/omm-pricer
+📝 File list: context-files.txt
+📦 Context pack: context-pack.txt (LIST_ONLY=0, MAX_FILE_BYTES=200000)
+✅ Tracked file list written to context-files.txt (      140 files )

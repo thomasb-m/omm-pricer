@@ -30,7 +30,7 @@ export function black76Greeks(
   // price (Black 76, discounted by df)
   const callPrice = df * (F * N(d1) - K * N(d2));
   const putPrice  = df * (K * N(-d2) - F * N(-d1));
-  const price = isCall ? callPrice : putPrice;
+  const price = (isCall ? callPrice : putPrice) / F;  // Convert USD to BTC
 
   const delta = (isCall ? N(d1) : (N(d1) - 1)) * df;
   const gamma = (df * pdf) / (F * sT);
@@ -47,13 +47,13 @@ export async function getLatestIndex(prisma: PrismaClient, indexName="btc_usd"){
   return r?.price ?? null;
 }
 export async function getLatestTickerIV(prisma: PrismaClient, name: string){
-  const r = await prisma.ticker.findFirst({ where:{ instrument: name, markIv: { not: null } }, orderBy:{ tsMs:"desc" }});
-  return (r?.markIv ?? null);
+  const r = await prisma.ticker.findFirst({ where:{ instrument: name, markIV: { not: null } }, orderBy:{ tsMs:"desc" }});
+  return (r?.markIV ?? null);
 }
 export async function getLatestTickerMid(prisma: PrismaClient, name: string){
   const r = await prisma.ticker.findFirst({ where:{ instrument: name }, orderBy:{ tsMs:"desc" }});
   if(!r) return null;
-  const mid = (r.bestBid!=null && r.bestAsk!=null) ? (r.bestBid+r.bestAsk)/2 : (r.markPrice ?? null);
+  const mid = (r.bid!=null && r.ask!=null) ? (r.bid+r.ask)/2 : (r.markPrice ?? null);
   return mid;
 }
 
@@ -148,14 +148,8 @@ export async function computePortfolioRisk(prisma: PrismaClient): Promise<Portfo
 }
 
 // ---- realized PnL from fills
+// ---- realized PnL from fills
 export async function computeRealizedPnL(prisma: PrismaClient){
-  // super-simplified: sum(side) * price * qty with sign
-  const fills = await prisma.fill.findMany();
-  let realized = 0;
-  for(const f of fills){
-    const sgn = f.side === "sell" ? +1 : -1; // selling reduces long inventory -> realize gains
-    realized += sgn * f.price * f.qty;
-    if(f.fee) realized -= Math.abs(f.fee);
-  }
-  return realized;
+  // TODO: Implement when Fill model exists
+  return 0;
 }

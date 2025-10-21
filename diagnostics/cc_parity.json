@@ -1,0 +1,59 @@
+{
+  "timestamp": "2025-10-21T15:21:57.042Z",
+  "fixtureHash": "b67f8eee51cca249aa1439cc9f23e8b8399894525a69ba70326de2e6182c1494",
+  "conventions": {
+    "K_CONVENTION": "ln(K/F)",
+    "SVI_FAMILY": "svi_raw",
+    "T_UNIT": "years",
+    "IV_UNIT": "ann_stdev",
+    "W_UNIT": "total_variance",
+    "PRICE_UNIT": "pv"
+  },
+  "totalFixtures": 3,
+  "totalPoints": 45,
+  "ivChecks": 45,
+  "wChecks": 45,
+  "passed": 90,
+  "failed": 0,
+  "worstIV": {
+    "errorBps": 0,
+    "fixture": -1,
+    "strike": 0,
+    "expected": 0,
+    "got": 0,
+    "F": 0,
+    "K": 0,
+    "T": 0
+  },
+  "worstW": {
+    "errorBps": 3.396276529753444e-12,
+    "fixture": 1,
+    "strike": 107000,
+    "expected": 0.005107721532035382,
+    "got": 0.005107721532035384,
+    "F": 112681.93,
+    "K": 107000,
+    "T": 0.038356164383561646
+  },
+  "failures": [],
+  "sviValidations": [
+    {
+      "fixture": 0,
+      "fixtureId": "btc_2025-01-03_7d_result",
+      "valid": true,
+      "errors": []
+    },
+    {
+      "fixture": 1,
+      "fixtureId": "btc_2025-01-03_7d_synthetic_14d",
+      "valid": true,
+      "errors": []
+    },
+    {
+      "fixture": 2,
+      "fixtureId": "btc_2025-01-03_7d_synthetic_30d",
+      "valid": true,
+      "errors": []
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "extends": "./tsconfig.scripts.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": ".tmp/verify",
+    "noEmit": false,
+    "declaration": false,
+    "sourceMap": false,
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "allowImportingTsExtensions": false,
+    "verbatimModuleSyntax": false,
+    "skipLibCheck": true
+  },
+  "files": [
+    "tools/ai/verify.ts",
+    "apps/server/src/volModels/sviMapping.ts"
+  ]
+}

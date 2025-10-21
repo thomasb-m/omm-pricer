@@ -1,0 +1,63 @@
+features:
+  usePCFit: true
+  enablePricing: true
+  enableShadow: true
+  enableFitter: false
+
+markets:
+  btc:
+    daycount: ACT_365
+    minTick: 0.0001
+    minLot: 1
+
+primitives:
+  daycount: ACT_365
+  timeBasis: ACT_365
+  spotScale: 1
+  defaultSpread: 0.001
+  epsilonT: 1e-9
+
+guards:
+  enforceStaticNoArb: true
+  staticNoArb:
+    enabled: true
+    epsilon: 1e-9
+  calendarNoArb:
+    enabled: false
+  maxPosition: 1000
+  maxNotional: 1000000
+  maxWingSlope: 2.0
+  minTotalVariance: 0.0001
+
+term:
+  method: monotone_convex_tv
+  interpolation: monotone-convex
+  shortDatedBlendDays: 2
+  minDays: 1
+  maxDays: 365
+
+risk:
+  covariance:
+    mode: structural
+    lookbackDays: 60
+    shrinkage: ledoit_wolf
+    enabled: true
+    sources: ["factor_returns", "pnl_innovations"]
+    alpha_structural: 0.5
+    alpha_pc: 0.3
+  lambda:
+    vega: 0.02
+    skew: 0.00
+    gamma: 0.00
+    delta: 0.00
+    learningRate: 0.01
+    capAbs: 0.1
+    targetVolBps: 50
+    floorBps: 5
+  lambda0: 0.02
+  targetVolBps: 50
+
+quoting:
+  baseWidthTicks: 2
+  baseSizeUnits: 1
+

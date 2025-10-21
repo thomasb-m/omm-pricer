@@ -1,0 +1,17 @@
+{
+  "timezone": "UTC",
+  "gridMinutes": 5,
+  "sessions": {
+    "default": { "scale": 1.0 }
+  },
+  "profile": [
+    { "mod": 0, "s": 0.8 },
+    { "mod": 360, "s": 1.2 },
+    { "mod": 720, "s": 1.0 },
+    { "mod": 1080, "s": 0.9 }
+  ],
+  "overnightOmega": {
+    "weekday": 0.00005,
+    "weekend": 0.00012
+  }
+}

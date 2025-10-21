@@ -68,7 +68,7 @@ export async function startIngest(prisma: PrismaClient) {
     ] as const) {
       await prisma.instrument.upsert({
         where: { id: n },
-        create: { id: n, name: n, kind: "option", currency: "BTC", strike, optionType: type, expiryMs },
+        create: { id: n, name: n, instrument: n, kind: "option", currency: "BTC", strike, optionType: type, expiryMs },
         update: {}
       });
     }
@@ -96,10 +96,9 @@ export async function startIngest(prisma: PrismaClient) {
             tsMs,
             instrument: "BTC-PERPETUAL",
             markPrice: f,
-            bestBid: null,
-            bestAsk: null,
-            underlying: f,
-            markIv: null
+            bid: null,
+            ask: null,
+            markIV: null
           }
         }).catch((e) => {
           console.error("[ingest] Perp ticker save error:", e);
@@ -113,9 +112,11 @@ export async function startIngest(prisma: PrismaClient) {
           await prisma.ticker.create({
             data: {
               tsMs, instrument: n,
-              markIv: mIv,
-              markPrice: 100 + Math.sin(t/20)*2 + (Math.random()-0.5),
-              bestBid: 99, bestAsk: 101, underlying: f
+              markIV: mIv,
+              markPrice: 0.02 + Math.sin(t/20)*0.005 + (Math.random()-0.5)*0.001,
+              bid: null,
+              ask: null,
+              mid: null
             }
           }).catch((e) => {
             console.error("[ingest] Option ticker save error:", e);
@@ -149,10 +150,9 @@ export async function startIngest(prisma: PrismaClient) {
             tsMs,
             instrument: "BTC-PERPETUAL",
             markPrice: price,
-            bestBid: null,
-            bestAsk: null,
-            underlying: price,
-            markIv: null
+            bid: null,
+            ask: null,
+            markIV: null
           }
         }).catch((e) => {
           console.error("[ingest] perp ticker save error:", e);
@@ -169,7 +169,7 @@ export async function startIngest(prisma: PrismaClient) {
       const bestAsk = typeof data.best_ask_price === "number" ? data.best_ask_price : null;
       const underlying = typeof data.underlying_price === "number" ? data.underlying_price : null;
       await prisma.ticker.create({
-        data: { tsMs, instrument: name, markIv, markPrice, bestBid, bestAsk, underlying }
+        data: { tsMs, instrument: name, markIV: markIv, markPrice, bid: bestBid, ask: bestAsk, mid: null }
       }).catch((e) => {
         console.error("[ingest] ticker save error:", e);
       });

@@ -33,6 +33,7 @@ export interface SVIParams {
   export interface NodeState {
     strike: number;
     pcAnchor: number;      // Last traded price
+    pcAnchorTs?: number;
     widthRef: number;      // Width when position established
     position: number;      // Signed size (negative = short)
     lastBucket: string;    // For detecting migrations
@@ -130,32 +131,60 @@ export interface SVIParams {
     /**
      * Convert trader metrics to SVI parameters
      */
-    static fromMetrics(metrics: TraderMetrics, config: Config): SVIParams {
-      const b = Math.max((metrics.S_pos - metrics.S_neg) / 2.0, config.bMin);
-      
-      const denominator = Math.max(metrics.S_pos - metrics.S_neg, 2 * config.bMin);
-      const rho = Math.max(-config.rhoMax, Math.min(config.rhoMax, 
-        (metrics.S_pos + metrics.S_neg) / denominator));
-      
-      const sigma = Math.max(b / Math.max(metrics.C0, config.c0Min), config.sigmaMin);
-      const a = metrics.L0 - b * sigma;
-      
-      return { a, b, rho, sigma, m: 0 };
-    }
+    static fromMetrics(
+      metrics: TraderMetrics,
+      config: Config,
+      options?: { preserveBumps?: boolean }
+    ): SVIParams {
+      const eps = 1e-12;
+      const rhoMax = config.rhoMax ?? 0.999;
+      const c0Min  = config.c0Min  ?? 1e-8;
+      const bMin   = config.bMin   ?? 1e-8;
+      const sigmaMin = config.sigmaMin ?? 1e-8;
     
+      const Sp = metrics.S_pos;
+      const Sn = metrics.S_neg;
+      const Ssum = Sp + Sn;
+      const Sdiff = Sp - Sn;
+    
+      // Correct identities: b = (S_pos + S_neg)/2, rho = (S_pos - S_neg)/(S_pos + S_neg)
+      let b_raw = 0.5 * Ssum;
+      let rho_raw = Math.abs(Ssum) > eps ? Sdiff / Ssum : 0;
+    
+      // Optional: when wings are symmetric (Ssum≈0), use S0 = b·ρ to preserve S0 bumps
+      if (options?.preserveBumps && Math.abs(Ssum) < 1e-6) {
+        const b_safe = Math.abs(b_raw) > eps ? Math.abs(b_raw) : bMin;
+        const rho_from_S0 = metrics.S0 / b_safe;
+        rho_raw = 0.75 * rho_raw + 0.25 * rho_from_S0; // Blend 25% from S0
+      }
+    
+      // Legalize without destroying bumps
+      let b = Math.max(Math.abs(b_raw), bMin); // SVI requires b > 0
+      let rho = Math.max(-rhoMax, Math.min(rhoMax, rho_raw));
+      
+      // C0 ≈ b/sigma => sigma ≈ b/C0
+      const sigma_raw = b / Math.max(metrics.C0, c0Min);
+      let sigma = Math.max(sigma_raw, sigmaMin);
+      
+      // L0 = a + b·sigma => a = L0 - b·sigma
+      let a = metrics.L0 - b * sigma;
+    
+      return { a, b, rho, sigma, m: 0 };
+    }  
+
     /**
      * Extract trader metrics from SVI parameters
      */
     static toMetrics(params: SVIParams): TraderMetrics {
       const L0 = params.a + params.b * params.sigma;
-      const S0 = params.b * params.rho;  // Approximation for m≈0
+      const S0 = params.b * params.rho;
       const C0 = params.sigma > 0 ? params.b / params.sigma : 0;
-      const S_neg = params.b * (params.rho - 1);
-      const S_pos = params.b * (params.rho + 1);
+      const S_neg = params.b * (1 - params.rho);
+      const S_pos = params.b * (1 + params.rho);
       
       return { L0, S0, C0, S_neg, S_pos };
     }
-  }
+  }  
   
   // ============================================================================
   // BUMP FUNCTIONS

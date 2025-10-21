@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OMM Pricer - Debug Dashboard</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
+      background: #0a0e27;
+      color: #e0e0e0;
+      padding: 20px;
+      line-height: 1.6;
+    }
+    
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+    
+    h1 {
+      font-size: 24px;
+      margin-bottom: 20px;
+      color: #00ff88;
+    }
+    
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+      gap: 20px;
+      margin-bottom: 20px;
+    }
+    
+    .card {
+      background: #1a1f3a;
+      border: 1px solid #2a3555;
+      border-radius: 8px;
+      padding: 20px;
+    }
+    
+    .card h2 {
+      font-size: 16px;
+      color: #00ff88;
+      margin-bottom: 15px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    
+    .stat-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px solid #2a3555;
+    }
+    
+    .stat-row:last-child {
+      border-bottom: none;
+    }
+    
+    .stat-label {
+      color: #888;
+    }
+    
+    .stat-value {
+      color: #fff;
+      font-weight: bold;
+    }
+    
+    .quote-card {
+      background: #1a1f3a;
+      border: 1px solid #2a3555;
+      border-radius: 8px;
+      padding: 15px;
+      margin-bottom: 10px;
+    }
+    
+    .quote-header {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+    
+    .quote-symbol {
+      font-size: 14px;
+      font-weight: bold;
+      color: #00ff88;
+    }
+    
+    .quote-decision {
+      font-size: 12px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      background: #00ff8844;
+      color: #00ff88;
+    }
+    
+    .quote-decision.passed {
+      background: #ff444444;
+      color: #ff4444;
+    }
+    
+    .quote-prices {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      margin-top: 10px;
+    }
+    
+    .price-box {
+      background: #0a0e27;
+      padding: 8px;
+      border-radius: 4px;
+      text-align: center;
+    }
+    
+    .price-label {
+      font-size: 10px;
+      color: #888;
+      text-transform: uppercase;
+    }
+    
+    .price-value {
+      font-size: 16px;
+      color: #fff;
+      font-weight: bold;
+    }
+    
+    .trade-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px solid #2a3555;
+      font-size: 12px;
+    }
+    
+    .trade-row:last-child {
+      border-bottom: none;
+    }
+    
+    .trade-buy {
+      color: #00ff88;
+    }
+    
+    .trade-sell {
+      color: #ff4444;
+    }
+    
+    .status {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      padding: 10px 20px;
+      background: #00ff8844;
+      border: 1px solid #00ff88;
+      border-radius: 8px;
+      font-size: 12px;
+    }
+    
+    .status.offline {
+      background: #ff444444;
+      border-color: #ff4444;
+    }
+    
+    .refresh-time {
+      color: #888;
+      font-size: 11px;
+      text-align: right;
+      margin-top: 10px;
+    }
+    
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px;
+    }
+    
+    .feature-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px;
+      background: #0a0e27;
+      border-radius: 4px;
+    }
+    
+    .feature-toggle {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #ff4444;
+    }
+    
+    .feature-toggle.on {
+      background: #00ff88;
+    }
+    
+    .abtest-winner {
+      background: #00ff8822;
+      border: 1px solid #00ff88;
+      border-radius: 8px;
+      padding: 15px;
+      margin-bottom: 15px;
+      text-align: center;
+    }
+    
+    .abtest-winner h3 {
+      font-size: 18px;
+      color: #00ff88;
+      margin-bottom: 10px;
+    }
+    
+    .abtest-comparison {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 15px;
+    }
+    
+    .abtest-config {
+      background: #0a0e27;
+      border-radius: 8px;
+      padding: 15px;
+    }
+    
+    .abtest-config h4 {
+      font-size: 14px;
+      color: #888;
+      margin-bottom: 10px;
+      text-transform: uppercase;
+    }
+    
+    .abtest-config.winner {
+      border: 2px solid #00ff88;
+    }
+    
+    .abtest-metric {
+      display: flex;
+      justify-content: space-between;
+      padding: 5px 0;
+      border-bottom: 1px solid #2a3555;
+      font-size: 12px;
+    }
+    
+    .abtest-metric:last-child {
+      border-bottom: none;
+    }
+  </style>  <!-- Keep this closing tag -->
+</head>
+<body>
+  <div class="status" id="status">● LIVE</div>
+  
+  <div class="container">
+    <h1>🎯 OMM Pricer - Debug Dashboard</h1>
+    
+    <div class="grid">
+      <!-- System State -->
+      <div class="card">
+        <h2>📊 System State</h2>
+        <div id="system-state">
+          <div class="stat-row">
+            <span class="stat-label">Loading...</span>
+            <span class="stat-value">-</span>
+          </div>
+        </div>
+        <div class="refresh-time" id="system-time"></div>
+      </div>
+      
+      <!-- Sigma Stats -->
+      <div class="card">
+        <h2>Σ Covariance Matrix</h2>
+        <div id="sigma-stats">
+          <div class="stat-row">
+            <span class="stat-label">Loading...</span>
+            <span class="stat-value">-</span>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Features -->
+      <div class="card">
+        <h2>⚙️ Features</h2>
+        <div class="feature-grid" id="features">
+          <div class="feature-item">
+            <div class="feature-toggle"></div>
+            <span>Loading...</span>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Risk Config -->
+      <div class="card">
+        <h2>🎚️ Risk Parameters</h2>
+        <div id="risk-params">
+          <div class="stat-row">
+            <span class="stat-label">Loading...</span>
+            <span class="stat-value">-</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Current Quotes -->
+    <div class="card">
+      <h2>💹 Current Quotes</h2>
+      <div id="quotes"></div>
+      <div class="refresh-time" id="quotes-time"></div>
+    </div>
+    
+    <!-- Recent Trades -->
+    <div class="card">
+      <h2>📈 Recent Trades</h2>
+      <div id="trades"></div>
+      <div class="refresh-time" id="trades-time"></div>
+    </div>
+    
+    <!-- A/B Test Results -->
+    <div class="card" id="abtest-section" style="display: none;">
+      <h2>🔬 A/B Test Results</h2>
+      <div id="abtest-winner"></div>
+      <div id="abtest-comparison"></div>
+      <div class="refresh-time" id="abtest-time"></div>
+    </div>
+  </div>
+  
+  <script>
+    const API_BASE = 'http://localhost:3000';
+    let isOnline = true;
+    
+    // Format number with commas
+    function fmt(num, decimals = 2) {
+      if (num === null || num === undefined) return '-';
+      return num.toFixed(decimals);
+    }
+    
+    // Format timestamp
+    function fmtTime(ts) {
+      const d = new Date(ts);
+      return d.toLocaleTimeString();
+    }
+    
+    // Update status indicator
+    function updateStatus(online) {
+      const status = document.getElementById('status');
+      isOnline = online;
+      if (online) {
+        status.textContent = '● LIVE';
+        status.className = 'status';
+      } else {
+        status.textContent = '● OFFLINE';
+        status.className = 'status offline';
+      }
+    }
+    
+    // Fetch system state
+    async function fetchState() {
+      try {
+        const res = await fetch(`${API_BASE}/debug/state`);
+        const data = await res.json();
+        
+        // System state
+        document.getElementById('system-state').innerHTML = `
+          <div class="stat-row">
+            <span class="stat-label">Config Version</span>
+            <span class="stat-value">${data.configVersion}</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Inventory Util</span>
+            <span class="stat-value">${fmt(data.inventory.utilization * 100, 1)}%</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Inventory Limit</span>
+            <span class="stat-value">${fmt(data.inventory.limit, 1)}</span>
+          </div>
+        `;
+        
+        // Sigma stats
+        document.getElementById('sigma-stats').innerHTML = `
+          <div class="stat-row">
+            <span class="stat-label">Ready</span>
+            <span class="stat-value">${data.sigma.ready ? '✅' : '⏳'}</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Samples</span>
+            <span class="stat-value">${data.sigma.samples}</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Trace</span>
+            <span class="stat-value">${fmt(data.sigma.trace, 6)}</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Condition #</span>
+            <span class="stat-value">${fmt(data.sigma.conditionNumber, 2)}</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Positive Definite</span>
+            <span class="stat-value">${data.sigma.isPD ? '✅' : '❌'}</span>
+          </div>
+        `;
+        
+        // Features
+        document.getElementById('features').innerHTML = Object.entries(data.features)
+          .map(([key, val]) => `
+            <div class="feature-item">
+              <div class="feature-toggle ${val ? 'on' : ''}"></div>
+              <span>${key.replace(/([A-Z])/g, ' $1').trim()}</span>
+            </div>
+          `).join('');
+        
+        // Risk params
+        document.getElementById('risk-params').innerHTML = `
+          <div class="stat-row">
+            <span class="stat-label">γ (gamma)</span>
+            <span class="stat-value">${fmt(data.risk.gamma, 2)}</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">z (model spread)</span>
+            <span class="stat-value">${fmt(data.risk.z, 2)}</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">η (eta - noise)</span>
+            <span class="stat-value">${fmt(data.risk.eta, 2)}</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">κ (kappa - inv widening)</span>
+            <span class="stat-value">${fmt(data.risk.kappa, 2)}</span>
+          </div>
+        `;
+        
+        document.getElementById('system-time').textContent = `Updated: ${fmtTime(data.timestamp)}`;
+        updateStatus(true);
+      } catch (err) {
+        console.error('Failed to fetch state:', err);
+        updateStatus(false);
+      }
+    }
+    
+    // Fetch quotes
+    async function fetchQuotes() {
+      try {
+        const res = await fetch(`${API_BASE}/debug/quotes`);
+        const data = await res.json();
+        
+        document.getElementById('quotes').innerHTML = data.quotes.map(q => `
+          <div class="quote-card">
+            <div class="quote-header">
+              <div class="quote-symbol">${q.symbol}</div>
+              <div class="quote-decision ${q.decision === 'passed' ? 'passed' : ''}">${q.decision.toUpperCase()}</div>
+            </div>
+            <div class="quote-prices">
+              <div class="price-box">
+                <div class="price-label">Theo</div>
+                <div class="price-value">$${fmt(q.theo)}</div>
+              </div>
+              <div class="price-box">
+                <div class="price-label">Bid</div>
+                <div class="price-value">$${fmt(q.bid)}</div>
+              </div>
+              <div class="price-box">
+                <div class="price-label">Ask</div>
+                <div class="price-value">$${fmt(q.ask)}</div>
+              </div>
+            </div>
+            <div class="stat-row" style="margin-top: 10px;">
+              <span class="stat-label">Edge</span>
+              <span class="stat-value">$${fmt(q.edge)}</span>
+            </div>
+            <div class="stat-row">
+              <span class="stat-label">Size</span>
+              <span class="stat-value">${fmt(q.size, 1)} contracts</span>
+            </div>
+          </div>
+        `).join('') || '<div style="color: #888; padding: 20px;">No quotes yet</div>';
+        
+        document.getElementById('quotes-time').textContent = `Updated: ${fmtTime(data.timestamp)}`;
+      } catch (err) {
+        console.error('Failed to fetch quotes:', err);
+      }
+    }
+    
+    // Fetch trades
+    async function fetchTrades() {
+      try {
+        const res = await fetch(`${API_BASE}/debug/history?type=trades&limit=10`);
+        const data = await res.json();
+        
+        document.getElementById('trades').innerHTML = data.trades?.map(t => `
+          <div class="trade-row">
+            <span class="trade-${t.side}">${t.side.toUpperCase()} ${fmt(t.qty, 1)}</span>
+            <span>${t.symbol}</span>
+            <span>$${fmt(t.price)}</span>
+            <span>Edge: $${fmt(t.edge)}</span>
+            <span>${fmtTime(t.timestamp)}</span>
+          </div>
+        `).join('') || '<div style="color: #888; padding: 20px;">No trades yet</div>';
+        
+        document.getElementById('trades-time').textContent = `Updated: ${fmtTime(data.timestamp)}`;
+      } catch (err) {
+        console.error('Failed to fetch trades:', err);
+      }
+    }
+
+    // Fetch A/B test results
+    async function fetchABTest() {
+      try {
+        const res = await fetch(`${API_BASE}/debug/abtest`);
+        console.log('A/B Test response status:', res.status);
+        
+        if (res.status === 404) {
+          document.getElementById('abtest-section').style.display = 'none';
+          return;
+        }
+        
+        const data = await res.json();
+        console.log('A/B Test data loaded:', data);
+        
+        document.getElementById('abtest-section').style.display = 'block';
+        
+        // Winner banner
+        const winnerEmoji = data.winner === 'TIE' ? '🤝' : data.winner === 'A' ? '🥇' : '🥈';
+        document.getElementById('abtest-winner').innerHTML = `
+          <div class="abtest-winner">
+            <h3>${winnerEmoji} Config ${data.winner} Wins!</h3>
+            <p>${data.winnerReason}</p>
+          </div>
+        `;
+        
+        // Comparison
+        document.getElementById('abtest-comparison').innerHTML = `
+          <div class="abtest-config ${data.winner === 'A' ? 'winner' : ''}">
+            <h4>Config A: ${data.configA.configName}</h4>
+            <div class="abtest-metric"><span>Net PnL</span><span>$${fmt(data.configA.netPnL)}</span></div>
+            <div class="abtest-metric"><span>Trades</span><span>${data.configA.totalTrades}</span></div>
+            <div class="abtest-metric"><span>Fill Rate</span><span>${fmt(data.configA.fillRate * 100, 1)}%</span></div>
+            <div class="abtest-metric"><span>Avg Edge</span><span>$${fmt(data.configA.avgEdge)}</span></div>
+            <div class="abtest-metric"><span>PnL/Trade</span><span>$${fmt(data.configA.pnlPerTrade)}</span></div>
+            <div class="abtest-metric"><span>Max Inv Util</span><span>${fmt(data.configA.maxInventoryUtil * 100, 1)}%</span></div>
+            <div class="abtest-metric"><span>Sharpe</span><span>${fmt(data.configA.sharpeRatio, 2)}</span></div>
+          </div>
+          <div class="abtest-config ${data.winner === 'B' ? 'winner' : ''}">
+            <h4>Config B: ${data.configB.configName}</h4>
+            <div class="abtest-metric"><span>Net PnL</span><span>$${fmt(data.configB.netPnL)}</span></div>
+            <div class="abtest-metric"><span>Trades</span><span>${data.configB.totalTrades}</span></div>
+            <div class="abtest-metric"><span>Fill Rate</span><span>${fmt(data.configB.fillRate * 100, 1)}%</span></div>
+            <div class="abtest-metric"><span>Avg Edge</span><span>$${fmt(data.configB.avgEdge)}</span></div>
+            <div class="abtest-metric"><span>PnL/Trade</span><span>$${fmt(data.configB.pnlPerTrade)}</span></div>
+            <div class="abtest-metric"><span>Max Inv Util</span><span>${fmt(data.configB.maxInventoryUtil * 100, 1)}%</span></div>
+            <div class="abtest-metric"><span>Sharpe</span><span>${fmt(data.configB.sharpeRatio, 2)}</span></div>
+          </div>
+        `;
+        
+        document.getElementById('abtest-time').textContent = `Test completed: ${fmtTime(data.timestamp)}`;
+      } catch (err) {
+        console.error('Failed to fetch A/B test:', err);
+        document.getElementById('abtest-section').style.display = 'none';
+      }
+    }
+    
+    // Refresh all data
+    // Refresh all data
+    function refreshAll() {
+      fetchState();
+      fetchQuotes();
+      fetchTrades();
+      fetchABTest();  // ← ADD THIS LINE
+    }
+    
+    // Initial load
+    refreshAll();
+    
+    // Auto-refresh every 1 second
+    setInterval(refreshAll, 1000);
+  </script>
+</body>
+</html>

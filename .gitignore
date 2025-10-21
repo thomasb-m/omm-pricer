@@ -89,3 +89,31 @@ public
 # Temporary folders
 tmp/
 temp/
+# local sqlite db
+apps/server/prisma/prisma/dev.db
+
+# Generated test data
+data/
+out/
+
+# Jest artifacts  
+jest/
+apps/server/jest/
+
+# Database files
+*.db
+*.db-journal
+
+# local artifacts / backups
+apps/server/prisma/dev.db
+*.bak
+*.backup
+.DS_Store
+
+# validation outputs (keep JSON fixtures opt-in only)
+vol-core-validation/output/*.png
+vol-core-validation/output/*.csv
+vol-core-validation/output/*.md
+venv/
+.venv/
+vol-core-validation.zip

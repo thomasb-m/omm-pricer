@@ -1,0 +1,1 @@
+timestamp,instrument,strike,type,deribit_bid,deribit_ask,deribit_mid,deribit_spread,deribit_iv,your_bid,your_ask,your_mid,your_spread,edge_vs_mid,inside_spread_pct,would_buy,would_sell,competitive
